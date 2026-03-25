@@ -26,7 +26,7 @@ class TweetRepository:
         return [str(row["handle"]) for row in rows]
 
     async def add_account(self, handle: str) -> bool:
-        normalized = handle.strip().lstrip("@")
+        normalized = handle.strip().lstrip("@").lower()
         if not normalized:
             return False
         async with self._database.connect() as conn:
@@ -40,7 +40,7 @@ class TweetRepository:
         return cursor.rowcount > 0
 
     async def remove_account(self, handle: str) -> bool:
-        normalized = handle.strip().lstrip("@")
+        normalized = handle.strip().lstrip("@").lower()
         if not normalized:
             return False
         async with self._database.connect() as conn:
@@ -129,7 +129,8 @@ class TweetRepository:
     async def list_unprocessed_tweets(self, limit: int, handles: Sequence[str] | None = None) -> list[RawTweet]:
         async with self._database.connect() as conn:
             if handles:
-                placeholders = ",".join("?" for _ in handles)
+                lower_handles = [h.lower() for h in handles]
+                placeholders = ",".join("?" for _ in lower_handles)
                 cursor = await conn.execute(
                     f"""
                     SELECT t.*
@@ -137,11 +138,11 @@ class TweetRepository:
                     LEFT JOIN processed_content p
                         ON p.tweet_external_id = t.external_id
                     WHERE p.tweet_external_id IS NULL
-                    AND t.handle IN ({placeholders})
+                    AND LOWER(t.handle) IN ({placeholders})
                     ORDER BY t.published_at DESC
                     LIMIT ?
                     """,
-                    (*handles, limit),
+                    (*lower_handles, limit),
                 )
             else:
                 cursor = await conn.execute(
@@ -199,9 +200,10 @@ class TweetRepository:
         params: list = [status.value for status in statuses]
         handle_clause = ""
         if handles:
-            handle_placeholders = ",".join("?" for _ in handles)
-            handle_clause = f"AND p.handle IN ({handle_placeholders})"
-            params.extend(handles)
+            lower_handles = [h.lower() for h in handles]
+            handle_placeholders = ",".join("?" for _ in lower_handles)
+            handle_clause = f"AND LOWER(p.handle) IN ({handle_placeholders})"
+            params.extend(lower_handles)
         params.append(limit)
         async with self._database.connect() as conn:
             cursor = await conn.execute(
