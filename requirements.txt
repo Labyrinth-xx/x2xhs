@@ -8,4 +8,4 @@ Jinja2
 rich
 Pillow
 playwright>=1.40.0
-python-telegram-bot>=21.0
+python-telegram-bot[job-queue]>=21.0
