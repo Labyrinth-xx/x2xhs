@@ -58,6 +58,9 @@ class TweetScreenshotter:
                         break
                 await article.scroll_into_view_if_needed()
                 await page.wait_for_timeout(1000)
+                # 将鼠标移出 article 区域，避免触发 hover card 遮挡内容
+                await page.mouse.move(0, 0)
+                await page.wait_for_timeout(500)
                 # 用页面截图 + clip，避免元素边界截断头像等溢出内容
                 box = await article.bounding_box()
                 padding = 12
