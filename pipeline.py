@@ -6,7 +6,7 @@ from pathlib import Path
 
 from config import AppConfig
 from processor.content_formatter import ContentFormatter
-from processor.translator import ClaudeTranslator
+from processor.translator import OpenRouterTranslator
 from publisher.image_overlay import TweetImageOverlayer
 from publisher.telegram_notifier import TelegramNotifier
 from scraper.image_downloader import ImageDownloader
@@ -28,7 +28,7 @@ class Pipeline:
         self._repo = TweetRepository(self._database)
         self._rsshub = RSSHubClient(config.scraper)
         self._twscrape = TwscrapeClient(config.scraper)
-        self._translator = ClaudeTranslator(config.processor)
+        self._translator = OpenRouterTranslator(config.processor)
         self._formatter = ContentFormatter()
         self._overlayer = TweetImageOverlayer()
         self._screenshotter = TweetScreenshotter(

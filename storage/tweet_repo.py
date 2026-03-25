@@ -298,27 +298,3 @@ class TweetRepository:
             image_urls=tuple(json.loads(row["image_urls"])),
         )
 
-    def _row_to_joined_tweet(self, row: object) -> RawTweet:
-        return RawTweet(
-            external_id=row["tweet_external_id"],
-            handle=row["handle"],
-            content=row["tweet_content"],
-            url=row["raw_url"],
-            published_at=datetime.fromisoformat(row["published_at"]),
-            source_type=row["source_type"],
-            source_value=row["source_value"],
-            image_urls=tuple(json.loads(row["image_urls"])),
-        )
-
-    def _row_to_content(self, row: object) -> ProcessedContent:
-        return ProcessedContent(
-            tweet_external_id=row["tweet_external_id"],
-            handle=row["handle"],
-            raw_url=row["raw_url"],
-            published_at=datetime.fromisoformat(row["published_at"]),
-            title_zh=row["title_zh"],
-            body_zh=row["body_zh"],
-            tags=tuple(json.loads(row["tags_json"])),
-            status=ProcessedStatus(row["status"]),
-            pushed_at=row["pushed_at"] if "pushed_at" in row.keys() else None,
-        )

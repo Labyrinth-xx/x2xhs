@@ -283,7 +283,3 @@ class OpenRouterTranslator:
             i += 1
 
         return "".join(chars)
-
-
-# 保持向后兼容的别名
-ClaudeTranslator = OpenRouterTranslator
