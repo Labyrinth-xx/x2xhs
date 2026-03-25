@@ -276,7 +276,7 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent) ->
                 accounts=accounts,
                 limit=limit,
                 scrape_first=scrape_first,
-                force=True,
+                force=False,
             )
             sent = result["sent"]
             inserted = result["inserted"]
@@ -284,6 +284,8 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent) ->
 
             if sent > 0:
                 reply = f"✅ 已发送 {sent} 条（本次新增 {inserted} 条）"
+            elif inserted > 0:
+                reply = f"抓到 {inserted} 条新增内容，但这次没有成功发送"
             else:
                 reply = f"没有可发的内容（新增 {inserted} 条）"
 
