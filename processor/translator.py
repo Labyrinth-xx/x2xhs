@@ -200,11 +200,22 @@ class OpenRouterTranslator:
         try:
             start = text.index("{")
             end = text.rindex("}") + 1
-            json_str = self._sanitize_json(text[start:end])
-            return TranslationPayload.model_validate_json(json_str)
-        except (ValueError, ValidationError, json.JSONDecodeError) as exc:
-            logger.error("模型返回格式无效（%s）: %s | 原文: %r", type(exc).__name__, exc, text[:400])
-            raise ValueError("模型返回内容无法解析为目标 JSON") from exc
+        except ValueError as exc:
+            logger.error("模型返回中未找到 JSON 对象: %r", text[:400])
+            raise ValueError("模型返回中未找到 JSON 对象") from exc
+
+        json_str = self._sanitize_json(text[start:end])
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as exc:
+            logger.error("模型返回 JSON 解析失败: %s | 清洗后: %r | 原文: %r", exc, json_str[:400], text[:400])
+            raise ValueError("模型返回内容不是合法 JSON") from exc
+
+        try:
+            return TranslationPayload.model_validate(data)
+        except ValidationError as exc:
+            logger.error("模型返回 JSON 字段校验失败: %s | 数据: %r", exc, data)
+            raise ValueError(f"模型返回 JSON 字段不符合要求: {exc.errors()[0]['msg']}") from exc
 
     @staticmethod
     def _sanitize_json(text: str) -> str:
@@ -240,11 +251,11 @@ class OpenRouterTranslator:
                     chars.append(ch)
                 else:
                     # 判断这个 " 是否为合法的关闭引号：
-                    # 向前跳过空白，若紧跟 , } ] 则为关闭引号；否则是字符串内裸 " 需转义
+                    # 向前跳过空白，若紧跟 : , } ] 则为关闭引号；否则是字符串内裸 " 需转义
                     j = i + 1
                     while j < n and text[j] in " \t\n\r":
                         j += 1
-                    if j >= n or text[j] in ",}]":
+                    if j >= n or text[j] in ":,}]":
                         in_string = False
                         chars.append(ch)
                     else:
