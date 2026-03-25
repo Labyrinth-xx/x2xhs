@@ -6,9 +6,8 @@ from enum import Enum
 
 
 class ProcessedStatus(str, Enum):
-    NEW = "new"
     SENT = "sent"
-    SKIPPED = "skipped"
+    FILTERED = "filtered"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +31,5 @@ class ProcessedContent:
     title_zh: str
     body_zh: str
     tags: tuple[str, ...]
-    status: ProcessedStatus = ProcessedStatus.NEW
+    status: ProcessedStatus = ProcessedStatus.SENT
     pushed_at: str | None = None
-

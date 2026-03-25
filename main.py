@@ -24,16 +24,10 @@ def build_parser() -> argparse.ArgumentParser:
     scrape_parser.add_argument("--accounts", nargs="+", help="指定账号（覆盖数据库监控列表）")
     scrape_parser.add_argument("--keywords", nargs="+", help="指定关键词（覆盖数据库关键词列表）")
 
-    process_parser = subparsers.add_parser("process", help="翻译未处理推文")
-    process_parser.add_argument("--limit", type=int, default=None, help="处理数量上限")
-
     deliver_parser = subparsers.add_parser("deliver", help="处理并发送内容到 Telegram")
     deliver_parser.add_argument("--accounts", nargs="+", help="指定账号（不填则取监控列表）")
     deliver_parser.add_argument("--limit", type=int, default=None, help="发送数量上限")
-    deliver_parser.add_argument("--no-scrape", action="store_true", help="不先抓取，直接发送库内 new 内容")
-
-    drain_parser = subparsers.add_parser("drain", help="清空 new 队列（全部标记为 sent）")
-    drain_parser.set_defaults(command="drain")
+    deliver_parser.add_argument("--no-scrape", action="store_true", help="不先抓取，直接尝试发送库内候选内容")
 
     subparsers.add_parser("status", help="查看当前状态").set_defaults(command="status")
     subparsers.add_parser("list-keywords", help="查看监控关键词").set_defaults(command="list-keywords")
@@ -65,26 +59,17 @@ async def run_command(args: argparse.Namespace) -> int:
         console.print(f"[cyan]抓取完成[/cyan] fetched={result['fetched']} inserted={result['inserted']}")
         return 0
 
-    if args.command == "process":
-        items = await pipeline.process(limit=args.limit)
-        console.print(f"[cyan]处理完成[/cyan] 新增 {len(items)} 条")
-        return 0
-
     if args.command == "deliver":
         result = await pipeline.deliver(
             accounts=args.accounts,
             limit=args.limit,
             scrape_first=not args.no_scrape,
+            force=True,
         )
         console.print(
             f"[cyan]发送完成[/cyan] "
             f"fetched={result['fetched']} inserted={result['inserted']} sent={result['sent']}"
         )
-        return 0
-
-    if args.command == "drain":
-        count = await pipeline.drain()
-        console.print(f"[yellow]已清空队列[/yellow] 标记 {count} 条为 sent")
         return 0
 
     if args.command == "status":
@@ -123,7 +108,7 @@ def render_status_table(counts: dict[str, int]) -> None:
     table = Table(title="x2xhs 状态")
     table.add_column("项目")
     table.add_column("数量", justify="right")
-    for key in ["tweets", "new", "sent", "scrape_log"]:
+    for key in ["tweets", "sent", "filtered", "scrape_log"]:
         table.add_row(key, str(counts.get(key, 0)))
     console.print(table)
 

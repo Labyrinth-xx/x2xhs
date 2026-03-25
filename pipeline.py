@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+import re
 from pathlib import Path
 
 from config import AppConfig
@@ -10,7 +10,7 @@ from processor.translator import ClaudeTranslator
 from publisher.image_overlay import TweetImageOverlayer
 from publisher.telegram_notifier import TelegramNotifier
 from scraper.image_downloader import ImageDownloader
-from scraper.models import ProcessedContent, ProcessedStatus
+from scraper.models import ProcessedContent, RawTweet
 from scraper.rsshub_client import RSSHubClient
 from scraper.twscrape_client import TwscrapeClient
 from scraper.tweet_screenshotter import TweetScreenshotter
@@ -18,6 +18,7 @@ from storage.database import Database
 from storage.tweet_repo import TweetRepository
 
 logger = logging.getLogger(__name__)
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 
 
 class Pipeline:
@@ -116,54 +117,22 @@ class Pipeline:
 
     _MIN_TRANSLATABLE_CHARS = 30
 
-    async def process(self, limit: int | None = None, handles: list[str] | None = None) -> list[ProcessedContent]:
-        import re as _re
-        await self.setup()
-        tweets = await self._repo.list_unprocessed_tweets(limit or self._config.scraper.max_tweets, handles=handles)
-        processed_items: list[ProcessedContent] = []
-        for tweet in tweets:
-            # 预检：去除 URL 后内容太短，直接标记 SKIPPED，不浪费翻译 API
-            text_only = _re.sub(r"https?://\S+", "", tweet.content).strip()
-            if len(text_only) < self._MIN_TRANSLATABLE_CHARS:
-                logger.info("内容过短，标记 SKIPPED [%s]", tweet.external_id)
-                await self._repo.save_processed_content(ProcessedContent(
-                    tweet_external_id=tweet.external_id,
-                    handle=tweet.handle,
-                    raw_url=tweet.url,
-                    published_at=tweet.published_at,
-                    title_zh="[内容过短]",
-                    body_zh=tweet.content or "(原文无实质内容)",
-                    tags=(),
-                    status=ProcessedStatus.SKIPPED,
-                ))
-                continue
-            try:
-                translated = await self._translator.translate(tweet)
-                formatted = self._formatter.format(translated)
-                await self._repo.save_processed_content(formatted)
-                processed_items.append(formatted)
-            except Exception as exc:
-                logger.warning("翻译失败，标记 SKIPPED [%s]: %s", tweet.external_id, exc)
-                await self._repo.save_processed_content(ProcessedContent(
-                    tweet_external_id=tweet.external_id,
-                    handle=tweet.handle,
-                    raw_url=tweet.url,
-                    published_at=tweet.published_at,
-                    title_zh="[翻译失败]",
-                    body_zh=str(exc),
-                    tags=(),
-                    status=ProcessedStatus.SKIPPED,
-                ))
-        return processed_items
-
     async def deliver(
         self,
         accounts: list[str] | None = None,
         limit: int | None = None,
         scrape_first: bool = False,
-    ) -> dict[str, int]:
+        force: bool = False,
+    ) -> dict[str, int | list[str]]:
         """抓取（可选）→ 翻译 → 截图/覆盖图 → Telegram 发送 → 标记 sent。"""
         await self.setup()
+
+        try:
+            purged = await self._repo.purge_expired_sent(ttl_days=7)
+            if purged:
+                logger.info("已清理过期 sent 记录 %d 条", purged)
+        except Exception as exc:
+            logger.warning("清理过期 sent 记录失败: %s", exc)
 
         fetched = 0
         inserted = 0
@@ -172,104 +141,123 @@ class Pipeline:
             fetched = result["fetched"]
             inserted = result["inserted"]
 
-        # 翻译未处理推文（指定账号时只处理该账号的）
-        await self.process(limit=limit, handles=accounts)
-
         if self._telegram is None:
             raise ValueError("未配置 Telegram，请检查 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID")
 
         effective_limit = limit or self._config.scraper.max_tweets
-        # Only filter by handle when accounts are explicitly specified.
-        # Keyword-sourced tweets come from various handles and must not be filtered out.
-        pairs = await self._repo.list_content_with_tweets(
-            [ProcessedStatus.NEW],
+        candidates = await self._repo.list_candidate_tweets(
             effective_limit,
-            handles=accounts,  # None → return all NEW regardless of handle
+            handles=accounts,
+            force=force,
         )
 
         sent = 0
-        for content, tweet in pairs:
+        errors: list[str] = []
+        for tweet in candidates:
+            text_only = _URL_RE.sub("", tweet.content).strip()
+            if len(text_only) < self._MIN_TRANSLATABLE_CHARS:
+                await self._repo.save_filtered(
+                    tweet_external_id=tweet.external_id,
+                    handle=tweet.handle,
+                    raw_url=tweet.url,
+                    published_at=tweet.published_at,
+                )
+                message = f"@{tweet.handle} 内容太短，已标记跳过"
+                logger.info("%s [%s]", message, tweet.external_id)
+                errors.append(message)
+                continue
+
+            try:
+                translated = await self._translator.translate(tweet)
+                content = self._formatter.format(translated)
+            except Exception as exc:
+                logger.warning("翻译失败 [%s]: %s", tweet.external_id, exc)
+                errors.append(f"@{tweet.handle} 翻译失败: {exc}")
+                continue
+
+            payload: dict[str, object]
             try:
                 payload = await self._build_payload(content, tweet)
-                await self._telegram.notify_content(payload)
-                await self._repo.mark_sent(content.tweet_external_id)
-                self._cleanup_images(payload.get("images", []))
-                sent += 1
             except Exception as exc:
-                logger.error("发送失败 [%s]: %s", content.tweet_external_id, exc)
+                logger.error("截图失败 [%s]: %s", tweet.external_id, exc)
+                errors.append(f"@{tweet.handle} 截图失败: {exc}")
+                continue
 
-        # 降级：指定了账号但 NEW 队列为空，重发该账号最新一条已发内容
-        resent = 0
-        if sent == 0 and accounts:
-            fallback = await self._repo.list_content_with_tweets(
-                [ProcessedStatus.SENT],
-                1,
-                handles=accounts,
-            )
-            for content, tweet in fallback:
-                try:
-                    payload = await self._build_payload(content, tweet)
-                    await self._telegram.notify_content(payload)
-                    self._cleanup_images(payload.get("images", []))
-                    resent += 1
-                except Exception as exc:
-                    logger.error("重发失败 [%s]: %s", content.tweet_external_id, exc)
+            cleanup_paths = payload.get("cleanup_paths", payload.get("images", []))
+            try:
+                await self._telegram.notify_content(payload)
+            except Exception as exc:
+                logger.error("发送失败 [%s]: %s", tweet.external_id, exc)
+                self._cleanup_images(cleanup_paths)
+                errors.append(f"@{tweet.handle} 发送失败: {exc}")
+                continue
 
-        return {"fetched": fetched, "inserted": inserted, "sent": sent, "resent": resent}
+            try:
+                await self._repo.save_sent(content)
+            except Exception as exc:
+                logger.error("发送后写入 sent 失败 [%s]: %s", tweet.external_id, exc)
+                errors.append(f"@{tweet.handle} 状态保存失败: {exc}")
+                self._cleanup_images(cleanup_paths)
+                continue
 
-    async def drain(self) -> int:
-        """将所有 new 状态标记为 sent，清空队列。"""
-        await self.setup()
-        pairs = await self._repo.list_content_with_tweets(
-            [ProcessedStatus.NEW],
-            limit=10000,
-        )
-        for content, _ in pairs:
-            await self._repo.mark_sent(content.tweet_external_id)
-        return len(pairs)
+            self._cleanup_images(cleanup_paths)
+            sent += 1
+
+        return {"fetched": fetched, "inserted": inserted, "sent": sent, "errors": errors}
 
     async def status(self) -> dict[str, int]:
         await self.setup()
         return await self._repo.status_counts()
 
-    async def _build_payload(self, content: ProcessedContent, tweet) -> dict:
+    async def _build_payload(self, content: ProcessedContent, tweet: RawTweet) -> dict[str, object]:
         file_key = content.tweet_external_id.replace("/", "_").replace(":", "_")[-40:]
+        created_paths: list[str] = []
 
-        # 截图
-        screenshot_path = await self._screenshotter.screenshot(tweet.url, file_key)
+        try:
+            # 截图
+            screenshot_path = await self._screenshotter.screenshot(tweet.url, file_key)
+            if screenshot_path and screenshot_path.exists():
+                created_paths.append(str(screenshot_path))
 
-        # 下载原始图片
-        downloaded_paths = ()
-        if tweet.image_urls:
-            downloaded_paths = await self._downloader.download_many(tweet.image_urls, file_key)
+            # 下载原始图片
+            downloaded_paths = ()
+            if tweet.image_urls:
+                downloaded_paths = await self._downloader.download_many(tweet.image_urls, file_key)
+                created_paths.extend(str(path) for path in downloaded_paths if path.exists())
 
-        # 图片覆盖（截图存在时，生成中文覆盖图）
-        overlay_path: Path | None = None
-        if screenshot_path and screenshot_path.exists():
-            try:
-                translations = await self._translator.translate_literal_parts(tweet)
-                overlay_path = self._overlayer.append_translations(screenshot_path, translations)
-            except Exception as exc:
-                logger.warning("翻译卡片生成失败，使用原始截图: %s", exc)
+            # 图片覆盖（截图存在时，生成中文覆盖图）
+            overlay_path: Path | None = None
+            if screenshot_path and screenshot_path.exists():
+                try:
+                    translations = await self._translator.translate_literal_parts(tweet)
+                    overlay_path = self._overlayer.append_translations(screenshot_path, translations)
+                    if overlay_path and overlay_path.exists():
+                        created_paths.append(str(overlay_path))
+                except Exception as exc:
+                    logger.warning("翻译卡片生成失败，使用原始截图: %s", exc)
 
-        images: list[str] = []
-        if overlay_path and overlay_path.exists():
-            images.append(str(overlay_path))
-        elif screenshot_path and screenshot_path.exists():
-            images.append(str(screenshot_path))
-        for p in downloaded_paths:
-            if p.exists():
-                images.append(str(p))
+            images: list[str] = []
+            if overlay_path and overlay_path.exists():
+                images.append(str(overlay_path))
+            elif screenshot_path and screenshot_path.exists():
+                images.append(str(screenshot_path))
+            for p in downloaded_paths:
+                if p.exists():
+                    images.append(str(p))
 
-        return {
-            "title": content.title_zh,
-            "body": content.body_zh,
-            "tags": list(content.tags),
-            "images": images,
-        }
+            return {
+                "title": content.title_zh,
+                "body": content.body_zh,
+                "tags": list(content.tags),
+                "images": images,
+                "cleanup_paths": created_paths,
+            }
+        except Exception:
+            self._cleanup_images(created_paths)
+            raise
 
-    def _cleanup_images(self, images: list[str]) -> None:
-        for image_str in images:
+    def _cleanup_images(self, images: list[str] | object) -> None:
+        for image_str in images if isinstance(images, list) else []:
             path = Path(image_str)
             try:
                 if path.exists():

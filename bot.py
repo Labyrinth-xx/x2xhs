@@ -41,7 +41,7 @@ def _format_keywords(keywords: list[str]) -> str:
 
 
 def _format_status(counts: dict[str, int]) -> str:
-    keys = ["tweets", "new", "sent", "scrape_log"]
+    keys = ["tweets", "sent", "filtered", "scrape_log"]
     lines = [f"{key}: {counts.get(key, 0)}" for key in keys]
     return "当前状态：\n" + "\n".join(lines)
 
@@ -95,10 +95,11 @@ async def _auto_deliver_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not accounts and not keywords:
             logger.info("定时任务：无监控账号和关键词，跳过")
             return
-        result = await pipeline.deliver(accounts=None, scrape_first=True)
+        result = await pipeline.deliver(accounts=None, scrape_first=True, force=False)
         logger.info(
-            "定时推送完成: fetched=%d inserted=%d sent=%d",
+            "定时推送完成: fetched=%d inserted=%d sent=%d errors=%d",
             result["fetched"], result["inserted"], result["sent"],
+            len(result.get("errors", [])),
         )
     except Exception:
         tb = traceback.format_exc()
@@ -195,8 +196,8 @@ async def _build_nl_context(pipeline: Pipeline) -> str:
         return (
             f"监控账号: {account_str}\n"
             f"tweets={counts.get('tweets', 0)} "
-            f"new={counts.get('new', 0)} "
-            f"sent={counts.get('sent', 0)}"
+            f"sent={counts.get('sent', 0)} "
+            f"filtered={counts.get('filtered', 0)}"
         )
     except Exception:
         return "暂无"
@@ -263,21 +264,37 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent) ->
             limit = params.get("limit")
 
             if not accounts:
-                accounts = await pipeline.list_accounts()
-            if not accounts:
-                await msg.reply_text("⚠️ 没有监控账号，请先添加（比如：加上 sama）")
-                return
+                monitored_accounts = await pipeline.list_accounts()
+                monitored_keywords = await pipeline.list_keywords()
+                if not monitored_accounts and not monitored_keywords:
+                    await msg.reply_text("⚠️ 没有监控账号或关键词，请先添加。")
+                    return
+            elif temp:
+                logger.info("临时发送账号: %s", accounts)
 
-            result = await pipeline.deliver(accounts=accounts, limit=limit, scrape_first=scrape_first)
+            result = await pipeline.deliver(
+                accounts=accounts,
+                limit=limit,
+                scrape_first=scrape_first,
+                force=True,
+            )
             sent = result["sent"]
             inserted = result["inserted"]
-            resent = result.get("resent", 0)
+            errors = result.get("errors", [])
+
             if sent > 0:
-                await msg.reply_text(f"✅ 已发送 {sent} 条（本次新增 {inserted} 条）")
-            elif resent > 0:
-                await msg.reply_text("✅ 已重新发送最新一条（本次无新内容）")
+                reply = f"✅ 已发送 {sent} 条（本次新增 {inserted} 条）"
             else:
-                await msg.reply_text(f"暂无新内容（本次新增 {inserted} 条，队列已空）")
+                reply = f"没有可发的内容（新增 {inserted} 条）"
+
+            if errors:
+                error_text = "\n".join(str(err) for err in errors[:3])
+                if len(errors) > 3:
+                    error_text += f"\n…共 {len(errors)} 条失败"
+                reply += f"\n\n⚠️ 失败详情：\n{error_text}"
+
+            await msg.reply_text(reply)
+            return
 
         elif action == "status":
             counts = await pipeline.status()

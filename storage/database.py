@@ -91,6 +91,12 @@ class Database:
                 WHERE status = 'drafted'
                 """
             )
+            await conn.execute(
+                """
+                DELETE FROM processed_content
+                WHERE status IN ('new', 'skipped')
+                """
+            )
 
     @asynccontextmanager
     async def connect(self) -> AsyncIterator[aiosqlite.Connection]:
