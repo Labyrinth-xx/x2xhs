@@ -64,7 +64,7 @@ async def run_command(args: argparse.Namespace) -> int:
             accounts=args.accounts,
             limit=args.limit,
             scrape_first=not args.no_scrape,
-            force=False,
+            force=True,
         )
         console.print(
             f"[cyan]发送完成[/cyan] "
