@@ -1,0 +1,11 @@
+httpx
+openai>=1.0.0
+pydantic
+python-dotenv
+feedparser
+aiosqlite
+Jinja2
+rich
+Pillow
+playwright>=1.40.0
+python-telegram-bot>=21.0

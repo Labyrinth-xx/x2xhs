@@ -1,0 +1,31 @@
+# 环境与密钥（绝对不提交）
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# 运行时数据（本地生成，不入库）
+data/
+output/
+temp_images/
+
+# 根目录下的调试截图
+*.png
+*.jpg
+
+# Playwright 浏览器缓存
+.playwright-mcp/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
