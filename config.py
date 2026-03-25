@@ -19,6 +19,14 @@ def _require_env(name: str) -> str:
     return value
 
 
+def _parse_int(name: str, default: str) -> int:
+    value = os.getenv(name, default).strip()
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是整数，当前值: {value!r}") from exc
+
+
 def _parse_max_tweets() -> int:
     value = os.getenv("SCRAPER_MAX_TWEETS", "20").strip()
     try:
@@ -96,8 +104,8 @@ def load_config() -> AppConfig:
         twitter_email=os.getenv("TWITTER_EMAIL", "").strip(),
         twitter_auth_token=os.getenv("TWSCRAPE_AUTH_TOKEN", "").strip(),
         twitter_ct0=os.getenv("TWSCRAPE_CT0", "").strip(),
-        min_faves=int(os.getenv("TWITTER_MIN_FAVES", "100")),
-        min_retweets=int(os.getenv("TWITTER_MIN_RETWEETS", "20")),
+        min_faves=_parse_int("TWITTER_MIN_FAVES", "100"),
+        min_retweets=_parse_int("TWITTER_MIN_RETWEETS", "20"),
     )
     processor = ProcessorConfig(
         openrouter_api_key=_require_env("OPENROUTER_API_KEY"),
@@ -114,7 +122,7 @@ def load_config() -> AppConfig:
         if telegram_bot_token and telegram_chat_id
         else None
     )
-    poll_interval = int(os.getenv("POLL_INTERVAL_MINUTES", "60"))
+    poll_interval = _parse_int("POLL_INTERVAL_MINUTES", "60")
     return AppConfig(
         root_dir=root_dir,
         data_dir=data_dir,
