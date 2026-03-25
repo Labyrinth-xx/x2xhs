@@ -8,6 +8,7 @@ from enum import Enum
 class ProcessedStatus(str, Enum):
     NEW = "new"
     SENT = "sent"
+    SKIPPED = "skipped"
 
 
 @dataclass(frozen=True, slots=True)

@@ -271,8 +271,11 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent) ->
             result = await pipeline.deliver(accounts=accounts, limit=limit, scrape_first=scrape_first)
             sent = result["sent"]
             inserted = result["inserted"]
+            resent = result.get("resent", 0)
             if sent > 0:
                 await msg.reply_text(f"✅ 已发送 {sent} 条（本次新增 {inserted} 条）")
+            elif resent > 0:
+                await msg.reply_text("✅ 已重新发送最新一条（本次无新内容）")
             else:
                 await msg.reply_text(f"暂无新内容（本次新增 {inserted} 条，队列已空）")
 
@@ -301,9 +304,8 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent) ->
             await msg.reply_text(f"⚠️ 未知操作: {action}")
 
     except Exception as exc:
-        tb = traceback.format_exc()
         logger.exception("Intent execution failed")
-        await msg.reply_text(f"❌ 执行失败\n\n{tb[:1000]}")
+        await msg.reply_text(f"❌ 执行出错：{exc}")
 
 
 async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

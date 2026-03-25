@@ -114,15 +114,46 @@ class Pipeline:
         await self.setup()
         return await self._repo.remove_keyword(keyword)
 
+    _MIN_TRANSLATABLE_CHARS = 30
+
     async def process(self, limit: int | None = None) -> list[ProcessedContent]:
+        import re as _re
         await self.setup()
         tweets = await self._repo.list_unprocessed_tweets(limit or self._config.scraper.max_tweets)
         processed_items: list[ProcessedContent] = []
         for tweet in tweets:
-            content = await self._translator.translate(tweet)
-            formatted = self._formatter.format(content)
-            await self._repo.save_processed_content(formatted)
-            processed_items.append(formatted)
+            # 预检：去除 URL 后内容太短，直接标记 SKIPPED，不浪费翻译 API
+            text_only = _re.sub(r"https?://\S+", "", tweet.content).strip()
+            if len(text_only) < self._MIN_TRANSLATABLE_CHARS:
+                logger.info("内容过短，标记 SKIPPED [%s]", tweet.external_id)
+                await self._repo.save_processed_content(ProcessedContent(
+                    tweet_external_id=tweet.external_id,
+                    handle=tweet.handle,
+                    raw_url=tweet.url,
+                    published_at=tweet.published_at,
+                    title_zh="[内容过短]",
+                    body_zh=tweet.content or "(原文无实质内容)",
+                    tags=(),
+                    status=ProcessedStatus.SKIPPED,
+                ))
+                continue
+            try:
+                translated = await self._translator.translate(tweet)
+                formatted = self._formatter.format(translated)
+                await self._repo.save_processed_content(formatted)
+                processed_items.append(formatted)
+            except Exception as exc:
+                logger.warning("翻译失败，标记 SKIPPED [%s]: %s", tweet.external_id, exc)
+                await self._repo.save_processed_content(ProcessedContent(
+                    tweet_external_id=tweet.external_id,
+                    handle=tweet.handle,
+                    raw_url=tweet.url,
+                    published_at=tweet.published_at,
+                    title_zh="[翻译失败]",
+                    body_zh=str(exc),
+                    tags=(),
+                    status=ProcessedStatus.SKIPPED,
+                ))
         return processed_items
 
     async def deliver(
@@ -167,7 +198,24 @@ class Pipeline:
             except Exception as exc:
                 logger.error("发送失败 [%s]: %s", content.tweet_external_id, exc)
 
-        return {"fetched": fetched, "inserted": inserted, "sent": sent}
+        # 降级：指定了账号但 NEW 队列为空，重发该账号最新一条已发内容
+        resent = 0
+        if sent == 0 and accounts:
+            fallback = await self._repo.list_content_with_tweets(
+                [ProcessedStatus.SENT],
+                1,
+                handles=accounts,
+            )
+            for content, tweet in fallback:
+                try:
+                    payload = await self._build_payload(content, tweet)
+                    await self._telegram.notify_content(payload)
+                    self._cleanup_images(payload.get("images", []))
+                    resent += 1
+                except Exception as exc:
+                    logger.error("重发失败 [%s]: %s", content.tweet_external_id, exc)
+
+        return {"fetched": fetched, "inserted": inserted, "sent": sent, "resent": resent}
 
     async def drain(self) -> int:
         """将所有 new 状态标记为 sent，清空队列。"""
