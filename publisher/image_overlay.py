@@ -129,9 +129,6 @@ class TweetImageOverlayer:
                 )
             )
 
-        # 覆盖原文中的蓝色链接文字
-        screenshot = self._cover_links(screenshot, pairs)
-
         # 从下往上插入，保持 Y 坐标不漂移
         result = screenshot
         for (_, insert_y), card, borders in reversed(list(zip(pairs, cards, all_borders))):
@@ -322,61 +319,6 @@ class TweetImageOverlayer:
             prev_avg = avg
 
         return None
-
-    def _cover_links(self, image: Image.Image, pairs: list) -> Image.Image:
-        """将截图中所有蓝色链接文字行用背景色覆盖。
-
-        X.com 链接文字为固定蓝色区间，扫描各段正文区域，
-        找到蓝色行后以整行背景色矩形遮盖。
-        """
-        # X.com 浅色主题链接蓝: R<100, G:100-200, B>150
-        # 深色主题链接蓝:         R<100, G:120-220, B>180
-        def _is_link_blue(r: int, g: int, b: int) -> bool:
-            return r < 120 and b > 150 and g > 80 and b > r + 30
-
-        result = image.copy()
-        draw = ImageDraw.Draw(result)
-        pixels = image.load()
-        width = image.width
-        bg = (15, 15, 15) if self._is_dark(image) else (255, 255, 255)
-
-        # 扫描范围：各段正文区域（跳过顶部头像行）
-        scan_regions: list[tuple[int, int]] = []
-        prev_y = 0
-        SKIP = [120] + [50] * (len(pairs) - 1)
-        for i, (_, insert_y) in enumerate(pairs):
-            y_start = prev_y + SKIP[i]
-            y_end = insert_y
-            scan_regions.append((y_start, y_end))
-            prev_y = insert_y
-
-        for y_start, y_end in scan_regions:
-            y = max(0, y_start)
-            while y < min(image.height, y_end):
-                blue_xs = [
-                    x for x in range(10, width - 10)
-                    if _is_link_blue(*pixels[x, y])
-                ]
-                if len(blue_xs) >= 3:
-                    # 找到蓝色行：向下扩展直到蓝色结束
-                    row_end = y
-                    while row_end + 1 < y_end:
-                        next_blue = [
-                            x for x in range(10, width - 10)
-                            if _is_link_blue(*pixels[x, row_end + 1])
-                        ]
-                        if len(next_blue) >= 2:
-                            row_end += 1
-                        else:
-                            break
-                    x_left = min(blue_xs) - 4
-                    x_right = max(blue_xs) + 4
-                    draw.rectangle([(x_left, y - 2), (x_right, row_end + 3)], fill=bg)
-                    y = row_end + 4
-                else:
-                    y += 1
-
-        return result
 
     def _find_text_bottom(self, image: Image.Image) -> int:
         """定位正文底边，作为翻译卡片插入点。
