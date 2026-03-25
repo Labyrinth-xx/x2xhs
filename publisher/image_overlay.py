@@ -173,7 +173,11 @@ class TweetImageOverlayer:
 
         lines = self._wrap(translation, body_font, inner_width)
         label_h = LABEL_FONT_SIZE
-        body_h = len(lines) * (BODY_FONT_SIZE + LINE_SPACING) - LINE_SPACING
+        PARA_SPACING = int(BODY_FONT_SIZE * 0.8)  # 段落空行高度
+        body_h = sum(
+            PARA_SPACING if not line else (BODY_FONT_SIZE + LINE_SPACING)
+            for line in lines
+        ) - LINE_SPACING
         card_h = PAD_TOP + label_h + LABEL_GAP + body_h + PAD_BOTTOM
 
         card = Image.new("RGB", (width, card_h), bg_color)
@@ -181,8 +185,11 @@ class TweetImageOverlayer:
         draw.text((text_left, PAD_TOP), "由 Claude 翻译自英语", fill=label_color, font=label_font)
         y = PAD_TOP + label_h + LABEL_GAP
         for line in lines:
-            draw.text((text_left, y), line, fill=text_color, font=body_font)
-            y += BODY_FONT_SIZE + LINE_SPACING
+            if not line:
+                y += PARA_SPACING
+            else:
+                draw.text((text_left, y), line, fill=text_color, font=body_font)
+                y += BODY_FONT_SIZE + LINE_SPACING
 
         return card
 
