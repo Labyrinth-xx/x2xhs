@@ -96,12 +96,12 @@ class RSSHubClient:
         source_type: str,
     ) -> str:
         if source_type == "account":
-            return source_value.lower()
+            return source_value
         author = getattr(entry, "author", "").strip()
         if author:
-            return author.replace("@", "").lower()
+            return author.replace("@", "")
         match = HANDLE_PATTERN.search(url)
-        return (match.group(1) if match else source_value).lower()
+        return match.group(1) if match else source_value
 
     def _extract_images(self, entry: dict[str, Any], summary: str) -> tuple[str, ...]:
         urls: list[str] = []

@@ -26,7 +26,7 @@ class TweetRepository:
         return [str(row["handle"]) for row in rows]
 
     async def add_account(self, handle: str) -> bool:
-        normalized = handle.strip().lstrip("@").lower()
+        normalized = handle.strip().lstrip("@")
         if not normalized:
             return False
         async with self._database.connect() as conn:
@@ -37,15 +37,22 @@ class TweetRepository:
                 """,
                 (normalized,),
             )
-        return cursor.rowcount > 0
+            if cursor.rowcount == 0:
+                # May exist with different casing; check case-insensitively
+                row = await (await conn.execute(
+                    "SELECT handle FROM monitored_accounts WHERE LOWER(handle)=?",
+                    (normalized.lower(),),
+                )).fetchone()
+                return row is None  # False = already exists
+        return True
 
     async def remove_account(self, handle: str) -> bool:
-        normalized = handle.strip().lstrip("@").lower()
+        normalized = handle.strip().lstrip("@")
         if not normalized:
             return False
         async with self._database.connect() as conn:
             cursor = await conn.execute(
-                "DELETE FROM monitored_accounts WHERE handle = ?",
+                "DELETE FROM monitored_accounts WHERE LOWER(handle) = LOWER(?)",
                 (normalized,),
             )
         return cursor.rowcount > 0
