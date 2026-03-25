@@ -116,10 +116,10 @@ class Pipeline:
 
     _MIN_TRANSLATABLE_CHARS = 30
 
-    async def process(self, limit: int | None = None) -> list[ProcessedContent]:
+    async def process(self, limit: int | None = None, handles: list[str] | None = None) -> list[ProcessedContent]:
         import re as _re
         await self.setup()
-        tweets = await self._repo.list_unprocessed_tweets(limit or self._config.scraper.max_tweets)
+        tweets = await self._repo.list_unprocessed_tweets(limit or self._config.scraper.max_tweets, handles=handles)
         processed_items: list[ProcessedContent] = []
         for tweet in tweets:
             # 预检：去除 URL 后内容太短，直接标记 SKIPPED，不浪费翻译 API
@@ -172,8 +172,8 @@ class Pipeline:
             fetched = result["fetched"]
             inserted = result["inserted"]
 
-        # 翻译所有未处理推文
-        await self.process(limit=limit)
+        # 翻译未处理推文（指定账号时只处理该账号的）
+        await self.process(limit=limit, handles=accounts)
 
         if self._telegram is None:
             raise ValueError("未配置 Telegram，请检查 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID")

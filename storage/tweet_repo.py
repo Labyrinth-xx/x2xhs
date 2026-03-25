@@ -126,20 +126,36 @@ class TweetRepository:
             row = await cursor.fetchone()
         return self._row_to_tweet(row) if row else None
 
-    async def list_unprocessed_tweets(self, limit: int) -> list[RawTweet]:
+    async def list_unprocessed_tweets(self, limit: int, handles: Sequence[str] | None = None) -> list[RawTweet]:
         async with self._database.connect() as conn:
-            cursor = await conn.execute(
-                """
-                SELECT t.*
-                FROM tweets t
-                LEFT JOIN processed_content p
-                    ON p.tweet_external_id = t.external_id
-                WHERE p.tweet_external_id IS NULL
-                ORDER BY t.published_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
+            if handles:
+                placeholders = ",".join("?" for _ in handles)
+                cursor = await conn.execute(
+                    f"""
+                    SELECT t.*
+                    FROM tweets t
+                    LEFT JOIN processed_content p
+                        ON p.tweet_external_id = t.external_id
+                    WHERE p.tweet_external_id IS NULL
+                    AND t.handle IN ({placeholders})
+                    ORDER BY t.published_at DESC
+                    LIMIT ?
+                    """,
+                    (*handles, limit),
+                )
+            else:
+                cursor = await conn.execute(
+                    """
+                    SELECT t.*
+                    FROM tweets t
+                    LEFT JOIN processed_content p
+                        ON p.tweet_external_id = t.external_id
+                    WHERE p.tweet_external_id IS NULL
+                    ORDER BY t.published_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
             rows = await cursor.fetchall()
         return [self._row_to_tweet(row) for row in rows]
 
