@@ -63,23 +63,35 @@ class OpenRouterTranslator:
         self._model = config.model
 
     async def translate(self, tweet: RawTweet) -> ProcessedContent:
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            max_tokens=4000,
-            messages=[
-                {"role": "system", "content": self._system_prompt()},
-                {"role": "user", "content": self._build_prompt(tweet)},
-            ],
-        )
-        msg = response.choices[0].message
-        text = msg.content or ""
-        # Thinking models (e.g. qwen3) put output in reasoning_content and leave content empty
-        if not text:
-            text = getattr(msg, "reasoning_content", None) or ""
-        # Strip <think>...</think> blocks that some models embed in content
         import re as _re
-        text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL).strip()
-        payload = self._parse_response(text)
+
+        messages = [
+            {"role": "system", "content": self._system_prompt()},
+            {"role": "user", "content": self._build_prompt(tweet)},
+        ]
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                max_tokens=4000,
+                messages=messages,
+            )
+            msg = response.choices[0].message
+            text = msg.content or ""
+            # Thinking models (e.g. qwen3) put output in reasoning_content and leave content empty
+            if not text:
+                text = getattr(msg, "reasoning_content", None) or ""
+            # Strip <think>...</think> blocks that some models embed in content
+            text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL).strip()
+            try:
+                payload = self._parse_response(text)
+                break
+            except ValueError as exc:
+                last_exc = exc
+                logger.warning("翻译解析失败，第 %d 次重试（共 3 次）: %s", attempt + 1, exc)
+        else:
+            raise last_exc  # type: ignore[misc]
+
         return ProcessedContent(
             tweet_external_id=tweet.external_id,
             handle=tweet.handle,
@@ -199,38 +211,65 @@ class OpenRouterTranslator:
         """修复模型输出的 JSON：
         1. 将结构层中文引号替换为英文双引号
         2. 移除字符串内的控制字符（如截断的 emoji 残留的代理字符）
+        3. 转义字符串内部未转义的英文双引号（模型偶尔在 body_zh 内输出裸 " ）
         """
-        import re as _re
-
         OPEN_QUOTES = "\u300c\u300e\u201c"   # 「『"
         CLOSE_QUOTES = "\u300d\u300f\u201d"  # 」』"
 
         chars: list[str] = []
         in_string = False
         escaped = False
+        i = 0
+        n = len(text)
 
-        for ch in text:
+        while i < n:
+            ch = text[i]
             if escaped:
                 chars.append(ch)
                 escaped = False
+                i += 1
                 continue
             if ch == "\\" and in_string:
                 chars.append(ch)
                 escaped = True
+                i += 1
                 continue
             if ch == '"':
-                in_string = not in_string
-                chars.append(ch)
+                if not in_string:
+                    in_string = True
+                    chars.append(ch)
+                else:
+                    # 判断这个 " 是否为合法的关闭引号：
+                    # 向前跳过空白，若紧跟 , } ] 则为关闭引号；否则是字符串内裸 " 需转义
+                    j = i + 1
+                    while j < n and text[j] in " \t\n\r":
+                        j += 1
+                    if j >= n or text[j] in ",}]":
+                        in_string = False
+                        chars.append(ch)
+                    else:
+                        chars.append('\\"')
+                i += 1
                 continue
-            # 字符串内：过滤控制字符（\x00-\x1F，换行除外）
-            if in_string and ord(ch) < 0x20 and ch not in ("\n", "\r", "\t"):
+            # 字符串内：转义裸换行/回车，过滤其他控制字符
+            if in_string and ord(ch) < 0x20:
+                if ch == "\n":
+                    chars.append("\\n")
+                elif ch == "\r":
+                    chars.append("\\r")
+                elif ch == "\t":
+                    chars.append("\\t")
+                # 其余控制字符直接丢弃
+                i += 1
                 continue
             # 结构层的中文引号替换为英文双引号
             if not in_string and (ch in OPEN_QUOTES or ch in CLOSE_QUOTES):
                 chars.append('"')
                 in_string = ch in OPEN_QUOTES
+                i += 1
                 continue
             chars.append(ch)
+            i += 1
 
         return "".join(chars)
 
