@@ -178,8 +178,8 @@ class TweetRepository:
                 """
                 INSERT INTO processed_content (
                     tweet_external_id, handle, raw_url, published_at,
-                    title_zh, body_zh, tags_json, status, pushed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    title_zh, body_zh, tags_json, status, mode, pushed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(tweet_external_id) DO UPDATE SET
                     handle=excluded.handle,
                     raw_url=excluded.raw_url,
@@ -188,6 +188,7 @@ class TweetRepository:
                     body_zh=excluded.body_zh,
                     tags_json=excluded.tags_json,
                     status='sent',
+                    mode=excluded.mode,
                     pushed_at=CURRENT_TIMESTAMP,
                     updated_at=CURRENT_TIMESTAMP
                 """,
@@ -200,6 +201,7 @@ class TweetRepository:
                     content.body_zh,
                     json.dumps(content.tags, ensure_ascii=False),
                     ProcessedStatus.SENT.value,
+                    content.mode,
                 ),
             )
 

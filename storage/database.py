@@ -78,6 +78,13 @@ class Database:
                 )
             except Exception:
                 pass  # Column already exists — safe to ignore
+            # Migration: add mode column (idempotent)
+            try:
+                await conn.execute(
+                    "ALTER TABLE processed_content ADD COLUMN mode TEXT NOT NULL DEFAULT 'light'"
+                )
+            except Exception:
+                pass  # Column already exists — safe to ignore
             # Migration: 5-state → 2-state (idempotent)
             await conn.execute(
                 """

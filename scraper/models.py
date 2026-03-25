@@ -31,5 +31,6 @@ class ProcessedContent:
     title_zh: str
     body_zh: str
     tags: tuple[str, ...]
+    mode: str = "light"
     status: ProcessedStatus = ProcessedStatus.SENT
     pushed_at: str | None = None
