@@ -6,7 +6,7 @@ from pathlib import Path
 
 from config import AppConfig
 from processor.content_formatter import ContentFormatter
-from processor.translator import ClaudeTranslator
+from processor.translator import ClaudeTranslator, TranslationSkipped
 from publisher.image_overlay import TweetImageOverlayer
 from publisher.telegram_notifier import TelegramNotifier
 from scraper.image_downloader import ImageDownloader
@@ -170,6 +170,16 @@ class Pipeline:
             try:
                 translated = await self._translator.translate(tweet)
                 content = self._formatter.format(translated)
+            except TranslationSkipped as exc:
+                await self._repo.save_filtered(
+                    tweet_external_id=tweet.external_id,
+                    handle=tweet.handle,
+                    raw_url=tweet.url,
+                    published_at=tweet.published_at,
+                )
+                logger.info("模型跳过 [%s]: %s", tweet.external_id, exc.reason)
+                errors.append(f"@{tweet.handle} 跳过: {exc.reason}")
+                continue
             except Exception as exc:
                 logger.warning("翻译失败 [%s]: %s", tweet.external_id, exc)
                 errors.append(f"@{tweet.handle} 翻译失败: {exc}")

@@ -14,6 +14,14 @@ from scraper.models import ProcessedContent, RawTweet
 
 logger = logging.getLogger(__name__)
 
+
+class TranslationSkipped(Exception):
+    """模型判断推文不在处理范围内，应标记跳过而非重试。"""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _HANDLE_DISPLAY = {
     "claudeai": "Claude官方账号",
@@ -89,6 +97,8 @@ class OpenRouterTranslator:
             try:
                 payload = self._parse_response(text)
                 break
+            except TranslationSkipped:
+                raise  # 模型拒绝，不重试
             except ValueError as exc:
                 last_exc = exc
                 logger.warning("翻译解析失败，第 %d 次重试（共 3 次）: %s", attempt + 1, exc)
@@ -177,6 +187,11 @@ class OpenRouterTranslator:
             start = text.index("{")
             end = text.rindex("}") + 1
         except ValueError as exc:
+            # 模型返回了有意义的文本但没有 JSON → 大概率是拒绝/不在范围
+            if len(text) > 10:
+                reason = text[:200].replace("\n", " ")
+                logger.info("模型拒绝处理: %s", reason)
+                raise TranslationSkipped(reason) from exc
             logger.error("模型返回中未找到 JSON 对象: %r", text[:400])
             raise ValueError("模型返回中未找到 JSON 对象") from exc
 
