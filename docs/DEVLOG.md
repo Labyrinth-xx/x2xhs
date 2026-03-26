@@ -166,3 +166,36 @@
 ### 遗留问题 / 下次继续
 - Cookie 自动刷新：目前需手动更新 `.env`，可考虑接入 Playwright 自动登录续期
 - 关键词搜索每次启动新 Chromium 实例，有启动开销；多关键词可考虑复用同一 browser context
+
+## 2026-03-26 — 截图翻译方案重构（X 内置翻译）+ 引用卡片支持
+
+### 完成内容
+
+**截图集成 X 平台内置翻译（`scraper/tweet_screenshotter.py`）**
+- 将 X 账号显示语言改为简体中文，使「翻译帖子」按钮对英文推文可见
+- 截图流程新增：关 cookie 弹窗 → 点翻译 → 等待展开 → 截图
+- 注入 CSS 隐藏 sticky header（高度 53px），防止遮挡推文头像/用户名
+- 改用 `element.screenshot()` 替代 `page.screenshot()+clip`，不受 viewport 高度限制
+- 同时从 DOM 读取 `div[role="link"]`（引用卡片）的底部 Y 坐标，以截图像素返回
+
+**引用卡片自定义翻译叠加（`publisher/image_overlay.py`）**
+- 新增 `append_at_y(path, translation, insert_y)` 方法，在精确 Y 位置插入单张翻译卡片
+- 复用现有卡片渲染逻辑（`_make_card`、边框连续性检测）
+
+**修复 `scraper/twscrape_client.py`**
+- 支持 `note_tweet` 字段读取完整长文（`full_text` 被 API 截断至 ~280 字符）
+- 支持 `quoted_status_result` 引用推文内容拼接到正文末尾
+
+**写作风格优化（`processor/prompts.py`）**
+- 去除独立「元过渡句」（如「这句话值得停一下想想。」）
+- 禁用「」引文格式，引用改为转述融入句子
+- 归因动词从「说」改为认为/指出/坦言/强调等有立场感的词
+
+### 关键决策
+- 放弃自定义 PIL 覆盖图作为主翻译方案，改用 X 内置 Google 翻译：位置更自然，无需像素扫描
+- 引用卡片翻译代码已实现但**暂时禁用**（`pipeline.py` 注释），待后续调整风格后启用
+- VPS 用 `root` 用户（非 `zhang`），本地公钥已写入 `root@91.99.136.130:~/.ssh/authorized_keys`
+
+### 遗留问题 / 下次继续
+- 引用卡片翻译：取消 `pipeline.py` 中的注释即可启用，翻译文本风格可单独调整
+- X 账号语言已改为中文，X 界面全程中文；若需改回需手动进设置
