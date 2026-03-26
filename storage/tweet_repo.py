@@ -138,6 +138,8 @@ class TweetRepository:
         limit: int,
         handles: Sequence[str] | None = None,
         force: bool = False,
+        min_score: int | None = None,
+        published_within_hours: int | None = 168,
     ) -> list[RawTweet]:
         join_condition = "p.status = 'filtered'"
         if not force:
@@ -152,6 +154,16 @@ class TweetRepository:
             placeholders = ",".join("?" for _ in lower_handles)
             handle_clause = f"AND LOWER(t.handle) IN ({placeholders})"
             params.extend(lower_handles)
+
+        score_clause = ""
+        if min_score is not None:
+            score_clause = "AND t.filter_score >= ?"
+            params.append(min_score)
+
+        time_clause = ""
+        if published_within_hours is not None:
+            time_clause = f"AND t.published_at > datetime('now', '-{published_within_hours} hours')"
+
         params.append(limit)
 
         async with self._database.connect() as conn:
@@ -164,6 +176,8 @@ class TweetRepository:
                     AND ({join_condition})
                 WHERE p.tweet_external_id IS NULL
                 {handle_clause}
+                {score_clause}
+                {time_clause}
                 ORDER BY t.published_at DESC
                 LIMIT ?
                 """,
@@ -241,16 +255,17 @@ class TweetRepository:
                 (score, reason, external_id),
             )
 
-    async def list_unscored_tweets(self, limit: int = 50) -> list[RawTweet]:
+    async def list_unscored_tweets(self, limit: int = 50, published_within_hours: int = 168) -> list[RawTweet]:
         async with self._database.connect() as conn:
             cursor = await conn.execute(
                 """
                 SELECT * FROM tweets
                 WHERE filter_score IS NULL
+                  AND published_at > datetime('now', '-' || ? || ' hours')
                 ORDER BY published_at DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (published_within_hours, limit),
             )
             rows = await cursor.fetchall()
         return [self._row_to_tweet(row) for row in rows]
@@ -272,7 +287,7 @@ class TweetRepository:
                     ON p.tweet_external_id = t.external_id
                 WHERE p.tweet_external_id IS NULL
                   AND t.filter_score >= ?
-                  AND t.created_at > datetime('now', '-3 days')
+                  AND t.published_at > datetime('now', '-7 days')
                 ORDER BY t.filter_score DESC, t.published_at DESC
                 LIMIT ?
                 """,

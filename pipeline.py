@@ -281,14 +281,31 @@ class Pipeline:
 
         _MAX_DELIVER = 5  # 绝对上限，防止 NLP 误解析导致刷屏
         effective_limit = min(limit or 2, _MAX_DELIVER)
+
         # 未指定账号时，只推送监控账号的推文；关键词抓取结果仅用于发现，不自动投递
         delivery_handles = accounts
         if delivery_handles is None:
             delivery_handles = await self._repo.list_accounts() or None
+
+        # 先评分未评分推文，确保候选有分数
+        unscored = await self._repo.list_unscored_tweets(limit=50)
+        if unscored:
+            feedback_rows = await self._repo.list_recent_feedback(limit=10)
+            feedback_lines = [
+                f"{fb['content']}（{fb['created_at'][:10]}）"
+                for fb in feedback_rows
+            ] if feedback_rows else None
+            for tweet in unscored:
+                score, reason = await self._scorer.score(
+                    tweet.handle, tweet.content, feedback_lines,
+                )
+                await self._repo.save_score(tweet.external_id, score, reason)
+
         candidates = await self._repo.list_candidate_tweets(
             effective_limit,
             handles=delivery_handles,
             force=force,
+            min_score=self.threshold,
         )
 
         sent = 0
