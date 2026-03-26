@@ -9,6 +9,7 @@ from telegram.ext import Application, ApplicationBuilder, CommandHandler, Contex
 from bot_intent import Intent, chat_reply, parse_intent
 from config import AppConfig, load_config
 from pipeline import Pipeline
+from processor.translator import TranslationSkipped
 
 # 专门用于 NL 解析和对话的模型（需要支持 JSON 输出，不能是纯推理模型）
 _BOT_MODEL = "google/gemini-2.0-flash-001"
@@ -53,15 +54,15 @@ async def _post_init(application: Application) -> None:
     application.bot_data[_BOT_DATA_CONFIG_KEY] = config
     application.bot_data[_BOT_DATA_PIPELINE_KEY] = pipeline
 
-    # 注册定时抓取发送任务
+    # 注册定时抓取+评分任务
     interval_seconds = config.poll_interval_minutes * 60
     application.job_queue.run_repeating(
-        _auto_deliver_job,
+        _auto_score_job,
         interval=interval_seconds,
         first=interval_seconds,
-        name="auto_deliver",
+        name="auto_score",
     )
-    logger.info("定时任务已注册，间隔 %d 分钟", config.poll_interval_minutes)
+    logger.info("定时评分任务已注册，间隔 %d 分钟", config.poll_interval_minutes)
 
 
 def _get_pipeline(context: ContextTypes.DEFAULT_TYPE) -> tuple[AppConfig, Pipeline]:
@@ -83,7 +84,8 @@ async def _ensure_allowed(update: Update, config: AppConfig) -> bool:
     return False
 
 
-async def _auto_deliver_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """定时任务：抓取 → 评分 → 推送候选到 Telegram。"""
     config = context.application.bot_data.get(_BOT_DATA_CONFIG_KEY)
     pipeline = context.application.bot_data.get(_BOT_DATA_PIPELINE_KEY)
     if not isinstance(config, AppConfig) or not isinstance(pipeline, Pipeline):
@@ -95,12 +97,25 @@ async def _auto_deliver_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not accounts and not keywords:
             logger.info("定时任务：无监控账号和关键词，跳过")
             return
-        result = await pipeline.deliver(accounts=None, scrape_first=True, force=False)
+        result = await pipeline.score_and_present(scrape_first=True)
         logger.info(
-            "定时推送完成: fetched=%d inserted=%d sent=%d errors=%d",
-            result["fetched"], result["inserted"], result["sent"],
-            len(result.get("errors", [])),
+            "定时评分完成: fetched=%d inserted=%d scored=%d candidates=%d",
+            result["fetched"], result["inserted"], result["scored"],
+            len(result.get("candidates", [])),
         )
+        # 缓存候选到 pipeline
+        candidates = result.get("candidates", [])
+        pipeline._last_candidates = candidates
+
+        # 有候选时推送到 Telegram
+        message = result.get("message")
+        if message and config.telegram:
+            from telegram import Bot
+            bot = Bot(token=config.telegram.bot_token)
+            await bot.send_message(
+                chat_id=config.telegram.chat_id,
+                text=message,
+            )
     except Exception:
         tb = traceback.format_exc()
         logger.error("定时任务失败:\n%s", tb)
@@ -121,7 +136,7 @@ async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     config, _ = _get_pipeline(context)
     if not await _ensure_allowed(update, config):
         return
-    jobs = context.job_queue.get_jobs_by_name("auto_deliver")
+    jobs = context.job_queue.get_jobs_by_name("auto_score")
     if not jobs:
         await update.effective_message.reply_text("⚠️ 定时任务不存在或已暂停。")
         return
@@ -135,16 +150,16 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     config, _ = _get_pipeline(context)
     if not await _ensure_allowed(update, config):
         return
-    jobs = context.job_queue.get_jobs_by_name("auto_deliver")
+    jobs = context.job_queue.get_jobs_by_name("auto_score")
     if jobs:
         await update.effective_message.reply_text("⚠️ 定时任务已在运行中，无需恢复。")
         return
     interval_seconds = config.poll_interval_minutes * 60
     context.job_queue.run_repeating(
-        _auto_deliver_job,
+        _auto_score_job,
         interval=interval_seconds,
         first=10,
-        name="auto_deliver",
+        name="auto_score",
     )
     logger.info("定时推送已恢复")
     await update.effective_message.reply_text("▶️ 定时推送已恢复，10 秒后开始首次执行。")
@@ -156,7 +171,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     await update.effective_message.reply_text(
         "\n".join([
-            "x2xhs bot 已启动，每小时自动抓取并推送新内容。",
+            "x2xhs bot 已启动，每小时自动抓取+评分并推送候选。",
+            "",
+            "📋 候选确认：回复「发1」确认发布",
+            "/scores 查看最近评分",
+            "/threshold [n] 查看/调整评分阈值",
+            "/feedback <内容> 给评分器反馈偏好",
             "",
             "/accounts 查看监控账号",
             "/add <handle> 添加账号",
@@ -167,8 +187,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "/resume 恢复自动推送",
             "",
             "或直接用自然语言说：",
-            "「发一条维斯塔潘的」「抓一下 elonmusk」「加上 sama」",
-            "「监控 AI Agent 话题」「删除关键词 LLM」",
+            "「发1」「跳过」「严格一点」「技术类的更好」",
         ])
     )
 
@@ -223,16 +242,67 @@ async def keywords_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.effective_message.reply_text(_format_keywords(keywords))
 
 
+async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config, pipeline = _get_pipeline(context)
+    if not await _ensure_allowed(update, config):
+        return
+    text = " ".join(context.args) if context.args else ""
+    if not text:
+        await update.effective_message.reply_text("用法: /feedback <你的反馈>\n例如: /feedback 技术教程类的适当加分")
+        return
+    await pipeline.add_feedback(text)
+    await update.effective_message.reply_text(f"✅ 已记录反馈，后续评分会参考")
+
+
+async def threshold_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config, pipeline = _get_pipeline(context)
+    if not await _ensure_allowed(update, config):
+        return
+    if not context.args:
+        await update.effective_message.reply_text(f"当前评分阈值: {pipeline.threshold}")
+        return
+    try:
+        new_val = int(context.args[0])
+        if not 1 <= new_val <= 10:
+            raise ValueError
+    except ValueError:
+        await update.effective_message.reply_text("阈值必须是 1-10 的整数")
+        return
+    await pipeline.set_threshold(new_val)
+    await update.effective_message.reply_text(f"✅ 评分阈值已调整为 {new_val}")
+
+
+async def scores_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config, pipeline = _get_pipeline(context)
+    if not await _ensure_allowed(update, config):
+        return
+    scores = await pipeline.list_recent_scores(limit=10)
+    if not scores:
+        await update.effective_message.reply_text("暂无评分记录")
+        return
+    lines = ["📊 最近评分：\n"]
+    for s in scores:
+        lines.append(
+            f"[{s['filter_score']}分] @{s['handle']}\n"
+            f"  {s['content_preview']}...\n"
+            f"  💡 {s['filter_reason']}\n"
+        )
+    await update.effective_message.reply_text("\n".join(lines))
+
+
 async def _build_nl_context(pipeline: Pipeline) -> str:
     try:
         accounts = await pipeline.list_accounts()
         counts = await pipeline.status()
         account_str = ", ".join(f"@{a}" for a in accounts) if accounts else "无"
+        candidate_count = pipeline.candidate_count
+        threshold = pipeline.threshold
         return (
             f"监控账号: {account_str}\n"
             f"tweets={counts.get('tweets', 0)} "
             f"sent={counts.get('sent', 0)} "
-            f"filtered={counts.get('filtered', 0)}"
+            f"filtered={counts.get('filtered', 0)}\n"
+            f"评分阈值={threshold} 当前候选={candidate_count}条"
         )
     except Exception:
         return "暂无"
@@ -242,6 +312,7 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
     action = intent.action
     params = intent.params
     msg = update.effective_message
+    config = pipeline._config
 
     try:
         if action == "add_account":
@@ -341,7 +412,7 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
             if context is None:
                 await msg.reply_text("⚠️ 无法执行，请直接发 /pause 命令。")
             else:
-                jobs = context.job_queue.get_jobs_by_name("auto_deliver")
+                jobs = context.job_queue.get_jobs_by_name("auto_score")
                 if not jobs:
                     await msg.reply_text("⚠️ 定时任务不存在或已暂停。")
                 else:
@@ -353,16 +424,16 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
             if context is None:
                 await msg.reply_text("⚠️ 无法执行，请直接发 /resume 命令。")
             else:
-                jobs = context.job_queue.get_jobs_by_name("auto_deliver")
+                jobs = context.job_queue.get_jobs_by_name("auto_score")
                 if jobs:
                     await msg.reply_text("⚠️ 定时任务已在运行中，无需恢复。")
                 else:
                     interval_seconds = config.poll_interval_minutes * 60
                     context.job_queue.run_repeating(
-                        _auto_deliver_job,
+                        _auto_score_job,
                         interval=interval_seconds,
                         first=10,
-                        name="auto_deliver",
+                        name="auto_score",
                     )
                     await msg.reply_text("▶️ 定时推送已恢复，10 秒后开始首次执行。")
 
@@ -373,6 +444,71 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
             await msg.reply_text(
                 f"✅ 抓取完成：获取 {result['fetched']} 条，新增 {result['inserted']} 条"
             )
+
+        elif action == "approve_candidate":
+            index = int(params.get("index", 0))
+            if index < 1:
+                await msg.reply_text("请指定候选序号，如「发1」")
+                return
+            await msg.reply_text(f"⏳ 正在处理第 {index} 条候选...")
+            try:
+                result = await pipeline.process_candidate(index)
+                if result.get("success"):
+                    await msg.reply_text(
+                        f"✅ 已处理 @{result['handle']}: {result['title']}\n"
+                        f"内容已发送到 Telegram，请在 Claude Code 中用 MCP 发布到小红书"
+                    )
+                else:
+                    await msg.reply_text(f"⚠️ 处理失败: {result.get('reason', '未知')}")
+            except ValueError as exc:
+                await msg.reply_text(f"⚠️ {exc}")
+            except TranslationSkipped as exc:
+                await msg.reply_text(f"⚠️ 模型判断不适合写: {exc.reason}")
+
+        elif action == "skip_candidates":
+            pipeline._last_candidates = []
+            await msg.reply_text("✅ 已跳过当前所有候选")
+
+        elif action == "scorer_feedback":
+            feedback_content = str(params.get("content", "")).strip()
+            if not feedback_content:
+                await msg.reply_text("请告诉我你的反馈内容")
+                return
+            await pipeline.add_feedback(feedback_content)
+            await msg.reply_text(f"✅ 已记录反馈，后续评分会参考")
+
+        elif action == "set_threshold":
+            value = params.get("value")
+            if value is None:
+                await msg.reply_text(f"当前评分阈值: {pipeline.threshold}")
+                return
+            try:
+                new_val = int(value)
+                if not 1 <= new_val <= 10:
+                    raise ValueError
+            except (ValueError, TypeError):
+                await msg.reply_text("阈值必须是 1-10 的整数")
+                return
+            await pipeline.set_threshold(new_val)
+            await msg.reply_text(f"✅ 评分阈值已调整为 {new_val}")
+
+        elif action == "list_scores":
+            scores = await pipeline.list_recent_scores(limit=10)
+            if not scores:
+                await msg.reply_text("暂无评分记录")
+            else:
+                lines = ["📊 最近评分：\n"]
+                for s in scores:
+                    lines.append(
+                        f"[{s['filter_score']}分] @{s['handle']}\n"
+                        f"  {s['content_preview']}...\n"
+                        f"  💡 {s['filter_reason']}\n"
+                    )
+                await msg.reply_text("\n".join(lines))
+
+        elif action == "clarify":
+            # Bot 反问用户以确认意图，reply 字段包含反问内容
+            pass  # reply 已在上面发送
 
         elif action == "chat":
             reply = await chat_reply(
@@ -442,6 +578,9 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("remove", remove_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("keywords", keywords_command))
+    application.add_handler(CommandHandler("feedback", feedback_command))
+    application.add_handler(CommandHandler("threshold", threshold_command))
+    application.add_handler(CommandHandler("scores", scores_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_natural_language))
     application.add_error_handler(_handle_error)
     return application

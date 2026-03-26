@@ -60,6 +60,12 @@ CREATE TABLE IF NOT EXISTS monitored_keywords (
     keyword TEXT NOT NULL UNIQUE,
     added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS scorer_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -85,6 +91,12 @@ class Database:
                 )
             except Exception:
                 pass  # Column already exists — safe to ignore
+            # Migration: add filter_score / filter_reason to tweets (idempotent)
+            for col, col_type in [("filter_score", "INTEGER"), ("filter_reason", "TEXT")]:
+                try:
+                    await conn.execute(f"ALTER TABLE tweets ADD COLUMN {col} {col_type}")
+                except Exception:
+                    pass  # Column already exists
             # Migration: 5-state → 2-state (idempotent)
             await conn.execute(
                 """

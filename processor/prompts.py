@@ -1,7 +1,8 @@
-"""推文解读 prompt 模板 — 小红书版。
+"""推文 prompt 模板 — 小红书版。
 
-所有 prompt 集中在此模块管理，translator.py 只调用这里的函数。
-后续扩展多平台时，在此增加 platform_adapter(platform) 函数即可。
+所有 prompt 集中在此模块管理：
+- build_system_prompt()  → translator.py 翻译用
+- build_scorer_prompt()  → scorer.py 评分用
 """
 from __future__ import annotations
 
@@ -123,3 +124,56 @@ def build_system_prompt() -> str:
         "tags 3–5 个，不含 # 前缀。\n"
         "JSON 用英文双引号。"
     )
+
+
+# ── 评分器 prompt ──
+
+_SCORER_TEMPLATE = (
+    "你是一个内容策展人，在为小红书上对全球科技感兴趣的读者把关内容。\n\n"
+
+    "你关注的 X 账号每天发出大量推文。你的工作是从中挑出能让读者觉得"
+    "「关注这个博主值得」的内容。\n\n"
+
+    "你的读者对科技有好奇心但不是从业者，他们期待看到自己在国内刷不到的、"
+    "看完觉得「长见识了」的、让人想分享或收藏的内容。\n\n"
+
+    "## 你的判断维度\n\n"
+
+    "1. **信息差**：这条推文提供了中文互联网不容易看到的事实、视角或趋势。"
+    "越是只有关注英文一手信息源才能知道的内容，价值越大。\n\n"
+
+    "2. **内容纵深**：推文的素材够厚——有足够的事实、背景、数据或论点，"
+    "能被展开成一篇有结构、有观点、读完让人觉得值的帖子。"
+    "素材越丰富，写作空间越大。\n\n"
+
+    "3. **选题眼光**：选这条来发本身就体现判断力——读者看到选题会觉得"
+    "「这个也能注意到」或「这个角度有意思」。好选题展示信息嗅觉。\n\n"
+
+    "4. **传播势能**：读者看完后会产生行动欲——想分享给朋友、想收藏回看、"
+    "想表达自己的看法。能触发互动说明内容击中了读者。\n\n"
+
+    "## 评分\n\n"
+
+    "8-10：非常值得写——读者会因为这条帖子觉得「关注对了」\n"
+    "6-7：值得写——有价值，但可能不是最亮眼的\n"
+    "4-5：可以写——有一些价值，但写出来可能平淡\n"
+    "1-3：跳过——给读者带来的价值有限\n\n"
+
+    "推文作者：{handle}\n"
+    "推文内容：{content}\n\n"
+
+    "只返回 JSON：{{\"score\": 7, \"reason\": \"一句话\"}}"
+)
+
+
+def build_scorer_prompt(
+    handle: str,
+    content: str,
+    feedback_lines: list[str] | None = None,
+) -> str:
+    """构建评分器 prompt，可选注入用户反馈作为编辑备注。"""
+    prompt = _SCORER_TEMPLATE.format(handle=handle, content=content)
+    if feedback_lines:
+        prompt += "\n\n## 编辑最近的反馈（请据此校准你的判断）\n"
+        prompt += "\n".join(f"- {line}" for line in feedback_lines)
+    return prompt

@@ -75,6 +75,13 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class FilterConfig:
+    threshold: int = 7
+    model: str = "deepseek/deepseek-chat"
+    expire_hours: int = 72
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     root_dir: Path
     data_dir: Path
@@ -83,6 +90,7 @@ class AppConfig:
     processor: ProcessorConfig
     publisher: PublisherConfig
     telegram: TelegramConfig | None
+    filter: FilterConfig = FilterConfig()
     poll_interval_minutes: int = 60
 
 
@@ -122,6 +130,11 @@ def load_config() -> AppConfig:
         if telegram_bot_token and telegram_chat_id
         else None
     )
+    filter_cfg = FilterConfig(
+        threshold=_parse_int("FILTER_THRESHOLD", "7"),
+        model=os.getenv("FILTER_MODEL", "deepseek/deepseek-chat").strip(),
+        expire_hours=_parse_int("FILTER_EXPIRE_HOURS", "72"),
+    )
     poll_interval = _parse_int("POLL_INTERVAL_MINUTES", "60")
     return AppConfig(
         root_dir=root_dir,
@@ -131,5 +144,6 @@ def load_config() -> AppConfig:
         processor=processor,
         publisher=publisher,
         telegram=telegram,
+        filter=filter_cfg,
         poll_interval_minutes=poll_interval,
     )

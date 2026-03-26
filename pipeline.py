@@ -6,6 +6,7 @@ from pathlib import Path
 
 from config import AppConfig
 from processor.content_formatter import ContentFormatter
+from processor.scorer import TweetScorer
 from processor.translator import ClaudeTranslator, TranslationSkipped
 from publisher.image_overlay import TweetImageOverlayer
 from publisher.telegram_notifier import TelegramNotifier
@@ -29,7 +30,10 @@ class Pipeline:
         self._rsshub = RSSHubClient(config.scraper)
         self._twscrape = TwscrapeClient(config.scraper)
         self._translator = ClaudeTranslator(config.processor)
+        self._scorer = TweetScorer(config.processor.openrouter_api_key, config.filter)
         self._formatter = ContentFormatter()
+        self._threshold_override: int | None = None
+        self._last_candidates: list[dict] = []
         self._overlayer = TweetImageOverlayer()
         self._screenshotter = TweetScreenshotter(
             auth_token=config.publisher.twitter_auth_token,
@@ -116,6 +120,137 @@ class Pipeline:
         return await self._repo.remove_keyword(keyword)
 
     _MIN_TRANSLATABLE_CHARS = 30
+
+    # ── 评分+候选推送（定时任务调用） ──
+
+    async def score_and_present(
+        self,
+        scrape_first: bool = True,
+        accounts: list[str] | None = None,
+    ) -> dict:
+        """抓取 → 评分未打分推文 → 返回候选列表消息。"""
+        await self.setup()
+
+        fetched = inserted = scored = 0
+        if scrape_first:
+            result = await self.scrape(use_rsshub=True, accounts=accounts)
+            fetched = result["fetched"]
+            inserted = result["inserted"]
+
+        # 评分
+        unscored = await self._repo.list_unscored_tweets(limit=50)
+        feedback_rows = await self._repo.list_recent_feedback(limit=10)
+        feedback_lines = [
+            f"{fb['content']}（{fb['created_at'][:10]}）"
+            for fb in feedback_rows
+        ] if feedback_rows else None
+
+        for tweet in unscored:
+            score, reason = await self._scorer.score(
+                tweet.handle, tweet.content, feedback_lines,
+            )
+            await self._repo.save_score(tweet.external_id, score, reason)
+            scored += 1
+
+        # 过期清理
+        expired = await self._repo.expire_old_tweets(
+            hours=self._config.filter.expire_hours,
+        )
+        if expired:
+            logger.info("过期清理 %d 条", expired)
+
+        # 取候选
+        candidates = await self._repo.list_scored_candidates(
+            min_score=self.threshold,
+            limit=5,
+        )
+
+        message = self._format_candidates(candidates) if candidates else None
+        return {
+            "fetched": fetched,
+            "inserted": inserted,
+            "scored": scored,
+            "candidates": candidates,
+            "message": message,
+        }
+
+    def _format_candidates(self, candidates: list[dict]) -> str:
+        """格式化候选推文列表为 Telegram 消息。"""
+        lines = ["📋 新候选推文\n"]
+        for i, c in enumerate(candidates, 1):
+            preview = c["content"][:80].replace("\n", " ")
+            lines.append(
+                f"{i}️⃣ [{c['filter_score']}分] @{c['handle']}\n"
+                f"{preview}...\n"
+                f"💡 {c['filter_reason']}\n"
+            )
+        lines.append("回复序号确认发布（如「发1」），或「跳过」全部放弃")
+        return "\n".join(lines)
+
+    async def process_candidate(self, index: int) -> dict:
+        """用户确认后处理指定候选：翻译 + 截图 + 覆盖图 → 发送到 Telegram。"""
+        await self.setup()
+
+        if not self._last_candidates or index < 1 or index > len(self._last_candidates):
+            raise ValueError(f"无效的候选序号 {index}，当前有 {len(self._last_candidates)} 条候选")
+
+        candidate = self._last_candidates[index - 1]
+        tweet = await self._repo.get_tweet(candidate["external_id"])
+        if tweet is None:
+            raise ValueError(f"找不到推文: {candidate['external_id']}")
+
+        # 长度检查
+        text_only = _URL_RE.sub("", tweet.content).strip()
+        if len(text_only) < self._MIN_TRANSLATABLE_CHARS:
+            await self._repo.save_filtered(
+                tweet_external_id=tweet.external_id,
+                handle=tweet.handle,
+                raw_url=tweet.url,
+                published_at=tweet.published_at,
+            )
+            return {"success": False, "reason": "内容太短"}
+
+        # 翻译
+        translated = await self._translator.translate(tweet)
+        content = self._formatter.format(translated)
+
+        # 截图 + 覆盖图 + 组装 payload
+        payload = await self._build_payload(content, tweet)
+
+        # 发送到 Telegram
+        if self._telegram is None:
+            raise ValueError("未配置 Telegram")
+        await self._telegram.notify_content(payload)
+
+        # 标记 sent
+        await self._repo.save_sent(content)
+        self._cleanup_images(payload.get("cleanup_paths", []))
+
+        return {"success": True, "title": content.title_zh, "handle": tweet.handle}
+
+    # ── 反馈方法 ──
+
+    async def add_feedback(self, content: str) -> None:
+        await self.setup()
+        await self._repo.save_feedback(content)
+
+    async def list_recent_scores(self, limit: int = 10) -> list[dict]:
+        await self.setup()
+        return await self._repo.list_recent_scores(limit)
+
+    @property
+    def threshold(self) -> int:
+        if self._threshold_override is not None:
+            return self._threshold_override
+        return self._config.filter.threshold
+
+    @property
+    def candidate_count(self) -> int:
+        return len(self._last_candidates)
+
+    async def set_threshold(self, value: int) -> None:
+        """运行时调整评分阈值（不持久化到 .env，重启恢复默认）。"""
+        self._threshold_override = value
 
     async def deliver(
         self,

@@ -232,6 +232,135 @@ class TweetRepository:
                 ),
             )
 
+    # ── 评分相关 ──
+
+    async def save_score(self, external_id: str, score: int, reason: str) -> None:
+        async with self._database.connect() as conn:
+            await conn.execute(
+                "UPDATE tweets SET filter_score = ?, filter_reason = ? WHERE external_id = ?",
+                (score, reason, external_id),
+            )
+
+    async def list_unscored_tweets(self, limit: int = 50) -> list[RawTweet]:
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT * FROM tweets
+                WHERE filter_score IS NULL
+                ORDER BY published_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+        return [self._row_to_tweet(row) for row in rows]
+
+    async def list_scored_candidates(
+        self,
+        min_score: int,
+        limit: int = 5,
+    ) -> list[dict]:
+        """返回达到阈值、尚未处理的推文（按分数降序）。"""
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT t.external_id, t.handle, t.content, t.url,
+                       t.published_at, t.filter_score, t.filter_reason,
+                       t.source_type, t.source_value, t.image_urls
+                FROM tweets t
+                LEFT JOIN processed_content p
+                    ON p.tweet_external_id = t.external_id
+                WHERE p.tweet_external_id IS NULL
+                  AND t.filter_score >= ?
+                  AND t.created_at > datetime('now', '-3 days')
+                ORDER BY t.filter_score DESC, t.published_at DESC
+                LIMIT ?
+                """,
+                (min_score, limit),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def expire_old_tweets(self, hours: int = 72) -> int:
+        """将超时未处理的已评分推文标记为 filtered。"""
+        async with self._database.connect() as conn:
+            # 找到超时且未处理的推文
+            cursor = await conn.execute(
+                """
+                SELECT t.external_id, t.handle, t.url, t.published_at
+                FROM tweets t
+                LEFT JOIN processed_content p ON p.tweet_external_id = t.external_id
+                WHERE p.tweet_external_id IS NULL
+                  AND t.filter_score IS NOT NULL
+                  AND t.created_at < datetime('now', '-' || ? || ' hours')
+                """,
+                (hours,),
+            )
+            expired_rows = await cursor.fetchall()
+            for row in expired_rows:
+                await conn.execute(
+                    """
+                    INSERT OR IGNORE INTO processed_content (
+                        tweet_external_id, handle, raw_url, published_at,
+                        title_zh, body_zh, tags_json, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["external_id"],
+                        row["handle"],
+                        row["url"],
+                        row["published_at"],
+                        "[过期]",
+                        "",
+                        "[]",
+                        ProcessedStatus.FILTERED.value,
+                    ),
+                )
+        return len(expired_rows)
+
+    # ── 反馈相关 ──
+
+    async def save_feedback(self, content: str) -> None:
+        async with self._database.connect() as conn:
+            await conn.execute(
+                "INSERT INTO scorer_feedback (content) VALUES (?)",
+                (content,),
+            )
+
+    async def list_recent_feedback(self, limit: int = 10) -> list[dict]:
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT content, created_at FROM scorer_feedback ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def delete_feedback(self, feedback_id: int) -> bool:
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                "DELETE FROM scorer_feedback WHERE id = ?",
+                (feedback_id,),
+            )
+        return cursor.rowcount > 0
+
+    async def list_recent_scores(self, limit: int = 10) -> list[dict]:
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT handle, filter_score, filter_reason,
+                       substr(content, 1, 80) AS content_preview,
+                       created_at
+                FROM tweets
+                WHERE filter_score IS NOT NULL
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
     async def purge_expired_sent(self, ttl_days: int = 7) -> int:
         async with self._database.connect() as conn:
             cursor = await conn.execute(
