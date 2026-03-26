@@ -55,6 +55,46 @@ class TweetImageOverlayer:
     def __init__(self) -> None:
         self._font_path = _resolve_font_path()
 
+    def append_at_y(self, screenshot_path: Path, translation: str, insert_y: int) -> Path | None:
+        """在截图的指定 Y 位置插入一张翻译卡片，返回新图片路径（*_zh.png）。
+
+        用于在已有 X 平台内置翻译的截图上，补充引用推文的中文翻译。
+        insert_y 由截图时从 DOM 读取引用卡片底部坐标（已换算为截图像素）。
+        """
+        if not screenshot_path.exists():
+            return None
+        translation = translation.strip()
+        if not translation:
+            return None
+        try:
+            output_path = screenshot_path.with_name(f"{screenshot_path.stem}_zh.png")
+            with Image.open(screenshot_path) as src:
+                screenshot = src.convert("RGB")
+            is_dark = self._is_dark(screenshot)
+            label_font = ImageFont.truetype(self._font_path, LABEL_FONT_SIZE)
+            body_font = ImageFont.truetype(self._font_path, BODY_FONT_SIZE)
+            card = self._make_card(screenshot.width, translation, body_font, label_font, is_dark)
+            borders = self._detect_quote_card_borders(screenshot, insert_y)
+            if borders:
+                card = self._apply_border_continuity(card, *borders)
+            top = screenshot.crop((0, 0, screenshot.width, insert_y))
+            bottom = screenshot.crop((0, insert_y, screenshot.width, screenshot.height))
+            combined = Image.new("RGB", (screenshot.width, screenshot.height + card.height))
+            combined.paste(top, (0, 0))
+            combined.paste(card, (0, insert_y))
+            combined.paste(bottom, (0, insert_y + card.height))
+            top.close()
+            bottom.close()
+            combined.save(output_path)
+            combined.close()
+            screenshot.close()
+            card.close()
+            logger.info("引用推文翻译卡片插入完成: %s (y=%d)", output_path.name, insert_y)
+            return output_path
+        except Exception as exc:
+            logger.warning("引用推文翻译卡片生成失败 [%s]: %s", screenshot_path, exc)
+            return None
+
     def append_translation(self, screenshot_path: Path, translation: str) -> Path | None:
         """在推文正文下方插入翻译卡片（正文后、图片前），返回新图片路径（*_zh.png）。"""
         return self.append_translations(screenshot_path, [translation])

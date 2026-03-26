@@ -228,8 +228,12 @@ class Pipeline:
         created_paths: list[str] = []
 
         try:
-            # 截图
-            screenshot_path = await self._screenshotter.screenshot(tweet.url, file_key)
+            # 截图（X 平台内置翻译已在截图中；同时返回引用卡片底部 Y）
+            screenshot_result = await self._screenshotter.screenshot(tweet.url, file_key)
+            screenshot_path: Path | None = None
+            quoted_bottom_y: int | None = None
+            if screenshot_result:
+                screenshot_path, quoted_bottom_y = screenshot_result
             if screenshot_path and screenshot_path.exists():
                 created_paths.append(str(screenshot_path))
 
@@ -239,16 +243,20 @@ class Pipeline:
                 downloaded_paths = await self._downloader.download_many(tweet.image_urls, file_key)
                 created_paths.extend(str(path) for path in downloaded_paths if path.exists())
 
-            # 图片覆盖（截图存在时，生成中文覆盖图）
+            # 引用推文翻译卡片（主推文已由 X 平台翻译，只补充引用部分）
             overlay_path: Path | None = None
-            if screenshot_path and screenshot_path.exists():
+            if screenshot_path and screenshot_path.exists() and quoted_bottom_y is not None:
                 try:
                     translations = await self._translator.translate_literal_parts(tweet)
-                    overlay_path = self._overlayer.append_translations(screenshot_path, translations)
-                    if overlay_path and overlay_path.exists():
-                        created_paths.append(str(overlay_path))
+                    quoted_translation = translations[1] if len(translations) >= 2 else None
+                    if quoted_translation:
+                        overlay_path = self._overlayer.append_at_y(
+                            screenshot_path, quoted_translation, quoted_bottom_y
+                        )
+                        if overlay_path and overlay_path.exists():
+                            created_paths.append(str(overlay_path))
                 except Exception as exc:
-                    logger.warning("翻译卡片生成失败，使用原始截图: %s", exc)
+                    logger.warning("引用推文翻译卡片生成失败，使用原始截图: %s", exc)
 
             images: list[str] = []
             if overlay_path and overlay_path.exists():

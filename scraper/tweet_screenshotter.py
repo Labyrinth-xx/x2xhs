@@ -8,6 +8,7 @@ from playwright.async_api import async_playwright
 logger = logging.getLogger(__name__)
 
 _COOKIE_DOMAINS = [".x.com", ".twitter.com"]
+_DEVICE_SCALE = 2
 
 # 隐藏 sticky header 的 CSS（截图前注入，避免头像被遮挡）
 _HIDE_HEADER_CSS = """
@@ -22,7 +23,8 @@ class TweetScreenshotter:
         self._auth_token = auth_token
         self._output_dir = output_dir
 
-    async def screenshot(self, tweet_url: str, file_key: str) -> Path | None:
+    async def screenshot(self, tweet_url: str, file_key: str) -> tuple[Path, int | None] | None:
+        """截取推文截图，同时返回引用卡片底部 Y 坐标（截图像素，无引用卡片则为 None）。"""
         if not self._auth_token:
             logger.warning("TWITTER_AUTH_TOKEN 未配置，跳过推文截图")
             return None
@@ -33,7 +35,7 @@ class TweetScreenshotter:
                 browser = await p.chromium.launch(headless=True)
                 context = await browser.new_context(
                     viewport={"width": 620, "height": 900},
-                    device_scale_factor=2,
+                    device_scale_factor=_DEVICE_SCALE,
                 )
                 await context.add_cookies(
                     [
@@ -78,6 +80,21 @@ class TweetScreenshotter:
 
                 await article.scroll_into_view_if_needed()
                 await page.wait_for_timeout(1000)
+
+                # 检测引用卡片底部 Y（article 内唯一的 div[role="link"]）
+                quoted_bottom_y: int | None = None
+                quoted_card = article.locator('div[role="link"]').first
+                if await quoted_card.count() > 0:
+                    try:
+                        art_box = await article.bounding_box()
+                        q_box = await quoted_card.bounding_box()
+                        if art_box and q_box:
+                            rel_bottom = q_box["y"] + q_box["height"] - art_box["y"]
+                            quoted_bottom_y = int(rel_bottom * _DEVICE_SCALE)
+                            logger.debug("引用卡片底部 y=%d（截图像素）", quoted_bottom_y)
+                    except Exception as exc:
+                        logger.debug("引用卡片位置检测失败: %s", exc)
+
                 # 将鼠标移出 article 区域，避免触发 hover card 遮挡内容
                 await page.mouse.move(0, 0)
                 await page.wait_for_timeout(300)
@@ -89,8 +106,8 @@ class TweetScreenshotter:
                 await article.screenshot(path=str(output_path))
 
                 await browser.close()
-            logger.info("推文截图完成: %s", output_path.name)
-            return output_path
+            logger.info("推文截图完成: %s (引用卡片底部=%s)", output_path.name, quoted_bottom_y)
+            return output_path, quoted_bottom_y
         except Exception as exc:
             logger.warning("推文截图失败 [%s]: %s", tweet_url, exc)
             return None
