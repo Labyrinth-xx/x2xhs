@@ -238,7 +238,7 @@ async def _build_nl_context(pipeline: Pipeline) -> str:
         return "暂无"
 
 
-async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent) -> None:
+async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, context: ContextTypes.DEFAULT_TYPE | None = None) -> None:
     action = intent.action
     params = intent.params
     msg = update.effective_message
@@ -337,6 +337,35 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent) ->
             counts = await pipeline.status()
             await msg.reply_text(_format_status(counts))
 
+        elif action == "pause":
+            if context is None:
+                await msg.reply_text("⚠️ 无法执行，请直接发 /pause 命令。")
+            else:
+                jobs = context.job_queue.get_jobs_by_name("auto_deliver")
+                if not jobs:
+                    await msg.reply_text("⚠️ 定时任务不存在或已暂停。")
+                else:
+                    for job in jobs:
+                        job.schedule_removal()
+                    await msg.reply_text("⏸ 定时推送已暂停。说「恢复」可重新开启。")
+
+        elif action == "resume":
+            if context is None:
+                await msg.reply_text("⚠️ 无法执行，请直接发 /resume 命令。")
+            else:
+                jobs = context.job_queue.get_jobs_by_name("auto_deliver")
+                if jobs:
+                    await msg.reply_text("⚠️ 定时任务已在运行中，无需恢复。")
+                else:
+                    interval_seconds = config.poll_interval_minutes * 60
+                    context.job_queue.run_repeating(
+                        _auto_deliver_job,
+                        interval=interval_seconds,
+                        first=10,
+                        name="auto_deliver",
+                    )
+                    await msg.reply_text("▶️ 定时推送已恢复，10 秒后开始首次执行。")
+
         elif action == "scrape":
             accounts = params.get("accounts") or None
             keywords = params.get("keywords") or None
@@ -384,7 +413,7 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
     if intent.reply and intent.action != "chat":
         await update.effective_message.reply_text(intent.reply)
 
-    await _execute_intent(update, pipeline, intent)
+    await _execute_intent(update, pipeline, intent, context)
 
 
 async def _handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
