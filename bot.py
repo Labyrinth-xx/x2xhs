@@ -117,6 +117,39 @@ async def _auto_deliver_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.error("发送错误通知失败: %s", send_exc)
 
 
+async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config, _ = _get_pipeline(context)
+    if not await _ensure_allowed(update, config):
+        return
+    jobs = context.job_queue.get_jobs_by_name("auto_deliver")
+    if not jobs:
+        await update.effective_message.reply_text("⚠️ 定时任务不存在或已暂停。")
+        return
+    for job in jobs:
+        job.schedule_removal()
+    logger.info("定时推送已暂停")
+    await update.effective_message.reply_text("⏸ 定时推送已暂停。发 /resume 恢复。")
+
+
+async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config, _ = _get_pipeline(context)
+    if not await _ensure_allowed(update, config):
+        return
+    jobs = context.job_queue.get_jobs_by_name("auto_deliver")
+    if jobs:
+        await update.effective_message.reply_text("⚠️ 定时任务已在运行中，无需恢复。")
+        return
+    interval_seconds = config.poll_interval_minutes * 60
+    context.job_queue.run_repeating(
+        _auto_deliver_job,
+        interval=interval_seconds,
+        first=10,
+        name="auto_deliver",
+    )
+    logger.info("定时推送已恢复")
+    await update.effective_message.reply_text("▶️ 定时推送已恢复，10 秒后开始首次执行。")
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config, _ = _get_pipeline(context)
     if not await _ensure_allowed(update, config):
@@ -130,6 +163,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "/remove <handle> 删除账号",
             "/keywords 查看监控关键词",
             "/status 查看状态",
+            "/pause 暂停自动推送",
+            "/resume 恢复自动推送",
             "",
             "或直接用自然语言说：",
             "「发一条维斯塔潘的」「抓一下 elonmusk」「加上 sama」",
@@ -371,6 +406,8 @@ def build_application() -> Application:
         .build()
     )
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("pause", pause_command))
+    application.add_handler(CommandHandler("resume", resume_command))
     application.add_handler(CommandHandler("accounts", accounts_command))
     application.add_handler(CommandHandler("add", add_command))
     application.add_handler(CommandHandler("remove", remove_command))
