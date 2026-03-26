@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import traceback
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 from bot_intent import Intent, chat_reply, parse_intent
@@ -63,6 +63,21 @@ async def _post_init(application: Application) -> None:
         name="auto_score",
     )
     logger.info("定时评分任务已注册，间隔 %d 分钟", config.poll_interval_minutes)
+
+    # 注册命令菜单（输入 / 时显示）
+    await application.bot.set_my_commands([
+        BotCommand("start", "查看帮助"),
+        BotCommand("scores", "最近评分"),
+        BotCommand("threshold", "查看/调整评分阈值"),
+        BotCommand("feedback", "给评分器反馈偏好"),
+        BotCommand("accounts", "监控账号列表"),
+        BotCommand("add", "添加监控账号"),
+        BotCommand("remove", "删除监控账号"),
+        BotCommand("keywords", "监控关键词列表"),
+        BotCommand("status", "查看系统状态"),
+        BotCommand("pause", "暂停自动推送"),
+        BotCommand("resume", "恢复自动推送"),
+    ])
 
 
 def _get_pipeline(context: ContextTypes.DEFAULT_TYPE) -> tuple[AppConfig, Pipeline]:
