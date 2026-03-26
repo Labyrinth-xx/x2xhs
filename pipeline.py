@@ -279,7 +279,8 @@ class Pipeline:
         if self._telegram is None:
             raise ValueError("未配置 Telegram，请检查 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID")
 
-        effective_limit = limit or self._config.scraper.max_tweets
+        _MAX_DELIVER = 5  # 绝对上限，防止 NLP 误解析导致刷屏
+        effective_limit = min(limit or 2, _MAX_DELIVER)
         # 未指定账号时，只推送监控账号的推文；关键词抓取结果仅用于发现，不自动投递
         delivery_handles = accounts
         if delivery_handles is None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import traceback
 
 from telegram import BotCommand, Update
@@ -77,6 +79,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("status", "查看系统状态"),
         BotCommand("pause", "暂停自动推送"),
         BotCommand("resume", "恢复自动推送"),
+        BotCommand("off", "🛑 紧急停止 bot"),
     ])
 
 
@@ -145,6 +148,15 @@ async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             except Exception as send_exc:
                 logger.error("发送错误通知失败: %s", send_exc)
+
+
+async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """紧急停止：立刻杀掉 bot 进程（systemd 不会自动重启，需 SSH 手动启动）。"""
+    config, _ = _get_pipeline(context)
+    if not await _ensure_allowed(update, config):
+        return
+    await update.effective_message.reply_text("🛑 紧急停止，bot 已关闭。重启：ssh zhang@91.99.136.130 然后 sudo systemctl start x2xhs")
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 async def pause_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -616,6 +628,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("feedback", feedback_command))
     application.add_handler(CommandHandler("threshold", threshold_command))
     application.add_handler(CommandHandler("scores", scores_command))
+    application.add_handler(CommandHandler("off", off_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_natural_language))
     application.add_error_handler(_handle_error)
     return application
