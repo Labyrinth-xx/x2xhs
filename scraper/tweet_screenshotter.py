@@ -9,6 +9,13 @@ logger = logging.getLogger(__name__)
 
 _COOKIE_DOMAINS = [".x.com", ".twitter.com"]
 
+# 隐藏 sticky header 的 CSS（截图前注入，避免头像被遮挡）
+_HIDE_HEADER_CSS = """
+    div[data-testid="primaryColumn"] > div > div:first-child {
+        visibility: hidden !important;
+    }
+"""
+
 
 class TweetScreenshotter:
     def __init__(self, auth_token: str, output_dir: Path) -> None:
@@ -49,30 +56,38 @@ class TweetScreenshotter:
                 await page.locator('[data-testid="User-Name"]').first.wait_for(
                     state="visible", timeout=10000
                 )
-                # 关掉 cookie 弹窗（如果出现）
-                for label in ("Accept all cookies", "Refuse non-essential cookies"):
+                # 关掉 cookie 弹窗（中英文均处理）
+                for label in (
+                    "接受所有 Cookie", "Accept all cookies",
+                    "拒绝非必要的 Cookie", "Refuse non-essential cookies",
+                ):
                     btn = page.get_by_role("button", name=label)
                     if await btn.count() > 0:
                         await btn.click()
                         await page.wait_for_timeout(800)
                         break
+
+                # 点击翻译按钮（账号语言设为中文后，英文推文会显示此按钮）
+                for label in ("翻译帖子", "Translate post"):
+                    btn = page.get_by_text(label, exact=False)
+                    if await btn.count() > 0:
+                        await btn.first.click()
+                        await page.wait_for_timeout(3000)
+                        logger.debug("推文翻译已展开")
+                        break
+
                 await article.scroll_into_view_if_needed()
                 await page.wait_for_timeout(1000)
                 # 将鼠标移出 article 区域，避免触发 hover card 遮挡内容
                 await page.mouse.move(0, 0)
-                await page.wait_for_timeout(500)
-                # 用页面截图 + clip，避免元素边界截断头像等溢出内容
-                box = await article.bounding_box()
-                padding = 12
-                await page.screenshot(
-                    path=str(output_path),
-                    clip={
-                        "x": max(0, box["x"] - padding),
-                        "y": max(0, box["y"] - padding),
-                        "width": box["width"] + padding * 2,
-                        "height": box["height"] + padding * 2,
-                    },
-                )
+                await page.wait_for_timeout(300)
+
+                # 隐藏 sticky header，防止遮挡头像
+                await page.add_style_tag(content=_HIDE_HEADER_CSS)
+
+                # 用 element.screenshot() 捕获整个 article（不受 viewport 高度限制）
+                await article.screenshot(path=str(output_path))
+
                 await browser.close()
             logger.info("推文截图完成: %s", output_path.name)
             return output_path
