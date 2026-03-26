@@ -350,7 +350,7 @@ class TweetImageOverlayer:
         found_text = False
         separator_y: int | None = None
 
-        for y in range(100, image.height):
+        for y in range(200, image.height):
             gray_pixels = [gray.getpixel((x, y)) for x in sample_xs]
             dark = [p for p in gray_pixels if p < 100]
             has_text = len(dark) >= 2

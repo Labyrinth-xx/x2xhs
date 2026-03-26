@@ -170,7 +170,26 @@ class TwscrapeClient:
             or _get(user_result, "legacy", "screen_name")
             or "unknown"
         )
-        text = legacy.get("full_text", "")
+        # 长推文（note tweet）full_text 会截断，完整内容在 note_tweet 字段
+        note_text = _get(result, "note_tweet", "note_tweet_results", "result", "text")
+        text = note_text or legacy.get("full_text", "")
+
+        # 引用推文：拼接到正文末尾，便于翻译器识别
+        quoted_result = _get(result, "quoted_status_result", "result", default={})
+        if quoted_result.get("__typename") == "TweetWithVisibilityResults":
+            quoted_result = quoted_result.get("tweet", {})
+        if quoted_result.get("__typename") == "Tweet":
+            q_legacy = quoted_result.get("legacy", {})
+            q_user = _get(quoted_result, "core", "user_results", "result", default={})
+            q_handle = (
+                _get(q_user, "core", "screen_name")
+                or _get(q_user, "legacy", "screen_name")
+                or "unknown"
+            )
+            q_note = _get(quoted_result, "note_tweet", "note_tweet_results", "result", "text")
+            q_text = q_note or q_legacy.get("full_text", "")
+            if q_text:
+                text = f"{text}\n\n[Quoted @{q_handle}:]\n{q_text}"
 
         try:
             created_at = parsedate_to_datetime(legacy.get("created_at", ""))
