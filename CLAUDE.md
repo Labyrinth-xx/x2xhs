@@ -43,11 +43,11 @@ python main.py check --limit 1          # 发布前质量检查
 
 每次 preview 阶段自动生成 `*_tweet_zh.png`，规则：
 
-- **模型**：`anthropic/claude-sonnet-4-6`（固定，不随 OPENROUTER_MODEL 变化）
+- **实现**：纯像素处理（PIL），不调用任何模型
 - **字体**：冬青黑体 `/System/Library/Fonts/Hiragino Sans GB.ttc`
 - **字号**：36px 起，溢出才缩小
 - **只翻译正文**，不处理链接卡片、附图、互动栏
-- **正文底边**：模型的 y2 坐标在高分辨率截图下系统性偏小，必须用 `_find_separator_y` 像素扫描修正（找灰色分隔线或最后一个文字像素行），**不能**只依赖模型坐标
+- **正文底边**：用 `_find_text_bottom` 像素扫描定位（找最后一个文字像素行），不依赖外部坐标
 - 测试时必须同时打开原图和覆盖图对比
 
 ## MCP 发布参数
