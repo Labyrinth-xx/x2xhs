@@ -283,12 +283,15 @@ class TweetImageOverlayer:
     def _find_all_insertion_points(self, image: Image.Image) -> list[int]:
         """返回所有翻译卡片的插入 Y 坐标列表。
 
-        通常返回 1 个（普通推文）或 2 个（含引用卡片且引用卡片内有图片）。
+        通常返回 1 个（普通推文）或 2 个（含引用卡片）。
+        引用卡片可以含图片（亮→暗跳变）或纯文字（扫文字底边）。
         """
         y1 = self._find_text_bottom(image)
         points = [y1]
 
         y2 = self._find_quoted_image_start(image, start_y=y1)
+        if y2 is None:
+            y2 = self._find_quoted_text_bottom(image, start_y=y1)
         if y2 is not None:
             points.append(y2)
 
@@ -330,8 +333,9 @@ class TweetImageOverlayer:
     def _find_text_bottom(self, image: Image.Image) -> int:
         """定位正文底边，作为翻译卡片插入点。
 
-        策略1（优先）：找 X UI 在正文和图片之间插入的灰色分隔线。
-        策略2（fallback）：找正文最后一行深色文字像素，连续 MAX_BLANK_ROWS 行无文字后停止。
+        合并扫描：在追踪文字行的同时检测灰色分隔线。
+        灰线必须出现在已见到文字之后才接受；
+        灰线后若又出现文字则自动重置（说明是嵌入元素的边框，不是正文结束）。
         """
         width = image.width
         x1 = int(width * TEXT_SCAN_X_RATIO[0])
@@ -340,23 +344,70 @@ class TweetImageOverlayer:
         if not sample_xs:
             return image.height
 
-        # 策略1：扫灰色分隔线
-        for y in range(100, image.height):
-            pixels = [image.getpixel((x, y)) for x in sample_xs]
-            gray_vals = [(p[0] + p[1] + p[2]) / 3 for p in pixels]
-            avg = sum(gray_vals) / len(gray_vals)
-            variance = sum((v - avg) ** 2 for v in gray_vals) / len(gray_vals)
-            if variance < 30 and 180 < avg < 242:
-                logger.debug("找到分隔线 y=%d（avg=%.1f variance=%.1f）", y, avg, variance)
-                return y
-
-        # 策略2：找正文最后一行文字后的第一个长空白
         gray = image.convert("L")
         last_text_y = 0
         blank_count = 0
         found_text = False
+        separator_y: int | None = None
 
         for y in range(100, image.height):
+            gray_pixels = [gray.getpixel((x, y)) for x in sample_xs]
+            dark = [p for p in gray_pixels if p < 100]
+            has_text = len(dark) >= 2
+
+            # 灰色分隔线检测：只在已见到文字且尚无候选分隔线时检测
+            if found_text and separator_y is None:
+                rgb_pixels = [image.getpixel((x, y)) for x in sample_xs]
+                rgb_vals = [(p[0] + p[1] + p[2]) / 3 for p in rgb_pixels]
+                avg = sum(rgb_vals) / len(rgb_vals)
+                variance = sum((v - avg) ** 2 for v in rgb_vals) / len(rgb_vals)
+                if variance < 30 and 180 < avg < 242:
+                    separator_y = y
+
+            if has_text:
+                last_text_y = y
+                blank_count = 0
+                found_text = True
+                separator_y = None  # 分隔线后又出现文字 → 是嵌入元素边框，重置
+            elif found_text:
+                blank_count += 1
+                if blank_count >= MAX_BLANK_ROWS:
+                    break
+
+        if separator_y is not None:
+            logger.debug("找到分隔线 y=%d", separator_y)
+            return separator_y
+
+        if not found_text:
+            logger.debug("未找到文字，翻译卡片放到底部")
+            return image.height
+
+        return min(image.height, last_text_y + 20)
+
+    def _find_quoted_text_bottom(self, image: Image.Image, start_y: int) -> int | None:
+        """引用卡片（纯文字，无嵌入图片）的文字底边检测。
+
+        在 start_y 之后跳过引用卡片头部（头像+账号行约 80px），
+        找到引用正文的最后一行文字。找不到则返回 None。
+        """
+        gray = image.convert("L")
+        width = image.width
+        x1 = int(width * TEXT_SCAN_X_RATIO[0])
+        x2 = int(width * TEXT_SCAN_X_RATIO[1])
+        sample_xs = list(range(x1, x2, 8))
+
+        QUOTE_HEADER_SKIP = 80
+        scan_start = start_y + QUOTE_HEADER_SKIP
+        scan_end = min(image.height - 50, start_y + 600)
+
+        if scan_start >= scan_end:
+            return None
+
+        last_text_y = 0
+        blank_count = 0
+        found_text = False
+
+        for y in range(scan_start, scan_end):
             pixels = [gray.getpixel((x, y)) for x in sample_xs]
             dark = [p for p in pixels if p < 100]
             has_text = len(dark) >= 2
@@ -370,10 +421,10 @@ class TweetImageOverlayer:
                 if blank_count >= MAX_BLANK_ROWS:
                     break
 
-        if not found_text:
-            logger.debug("未找到文字，翻译卡片放到底部")
-            return image.height
+        if not found_text or last_text_y <= scan_start + 10:
+            return None
 
+        logger.debug("检测到引用推文文字底边 y=%d", last_text_y)
         return min(image.height, last_text_y + 20)
 
     def _is_dark(self, image: Image.Image) -> bool:
