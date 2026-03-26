@@ -145,9 +145,13 @@ class Pipeline:
             raise ValueError("未配置 Telegram，请检查 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID")
 
         effective_limit = limit or self._config.scraper.max_tweets
+        # 未指定账号时，只推送监控账号的推文；关键词抓取结果仅用于发现，不自动投递
+        delivery_handles = accounts
+        if delivery_handles is None:
+            delivery_handles = await self._repo.list_accounts() or None
         candidates = await self._repo.list_candidate_tweets(
             effective_limit,
-            handles=accounts,
+            handles=delivery_handles,
             force=force,
         )
 
