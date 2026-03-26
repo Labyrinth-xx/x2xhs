@@ -378,11 +378,31 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
             keywords = await pipeline.list_keywords()
             await msg.reply_text(_format_keywords(keywords))
 
+        elif action == "score_and_present":
+            accounts = params.get("accounts") or None
+            scrape_first = bool(params.get("scrape_first", True))
+            await msg.reply_text("⏳ 正在抓取并评分，稍等...")
+            result = await pipeline.score_and_present(
+                scrape_first=scrape_first,
+                accounts=accounts,
+            )
+            pipeline._last_candidates = result.get("candidates", [])
+            message = result.get("message")
+            if message:
+                await msg.reply_text(message)
+            else:
+                await msg.reply_text(
+                    f"暂无高分候选（已评分 {result['scored']} 条，新增 {result['inserted']} 条）"
+                )
+
         elif action == "deliver":
             accounts = params.get("accounts") or None
             scrape_first = bool(params.get("scrape_first", True))
             temp = bool(params.get("temp", False))
             limit = params.get("limit")
+            # 用户未指定数量时默认最多 2 条，防止刷屏
+            if limit is None:
+                limit = 2
 
             if not accounts:
                 monitored_accounts = await pipeline.list_accounts()
