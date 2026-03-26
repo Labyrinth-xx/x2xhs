@@ -11,7 +11,9 @@
 
 ## 监控账号
 
-`claudeai` `AnthropicAI` `sama` `elonmusk` `naval`
+`claudeai` `AnthropicAI` `sama` `elonmusk` `karpathy` `realDonaldTrump`
+
+> Trump 帖子在 `preview --approve` 阶段手动筛选，只发政策相关（关税/科技制裁/中美关系），拒掉纯党派/情绪内容。
 
 ## 标准发布流程
 
