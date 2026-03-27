@@ -136,15 +136,25 @@ async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         candidates = result.get("candidates", [])
         pipeline._last_candidates = candidates
 
-        # 有候选时推送到 Telegram
-        message = result.get("message")
-        if message and config.telegram:
+        # 只推送未播报过的新候选，已出现过的静默跳过
+        new_candidates = [
+            c for c in candidates
+            if c["external_id"] not in pipeline._presented_candidate_ids
+        ]
+        if not new_candidates:
+            logger.info("定时任务：无新候选，静默")
+            return
+
+        message = pipeline._format_candidates(new_candidates)
+        if config.telegram:
             from telegram import Bot
             bot = Bot(token=config.telegram.bot_token)
             await bot.send_message(
                 chat_id=config.telegram.chat_id,
                 text=message,
             )
+        for c in new_candidates:
+            pipeline._presented_candidate_ids.add(c["external_id"])
     except Exception:
         tb = traceback.format_exc()
         logger.error("定时任务失败:\n%s", tb)

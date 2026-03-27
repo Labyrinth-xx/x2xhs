@@ -45,6 +45,7 @@ class Pipeline:
         self._telegram = TelegramNotifier(config.telegram) if config.telegram else None
         self._xai = XAIClient(config.xai, config.processor.openrouter_api_key) if config.xai else None
         self._viral_selector = ViralSelector(config.processor)
+        self._presented_candidate_ids: set[str] = set()
 
     async def setup(self) -> Path:
         self._config.data_dir.mkdir(parents=True, exist_ok=True)
