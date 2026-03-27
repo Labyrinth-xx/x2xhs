@@ -63,29 +63,6 @@ mcp__xiaohongshu__publish_content(
 )
 ```
 
-## VPS 操作规范
-
-**⚠️ 所有 VPS 操作必须用 zhang 用户，禁止用 root。**
-
-```bash
-# 唯一正确的 SSH 方式
-ssh zhang@91.99.136.130
-
-# 项目目录
-/home/zhang/x2xhs
-
-# 代码同步 + 重启（标准流程）
-git pull && sudo systemctl restart x2xhs
-
-# 查看 bot 状态 / 日志
-systemctl status x2xhs
-sudo journalctl -u x2xhs -f
-```
-
-- bot 由 systemd 管理（`x2xhs.service`，开机自启，崩溃自动重启）
-- 绝对不要用 nohup 手动启动，会绕过 systemd 造成双进程
-- root 密码仅作紧急备用，日常不碰
-
 ## 注意事项
 
 - `check` 通过标准：正文 200–800 字、tag 3–5 个、图片本地文件存在、无 X 原链接
