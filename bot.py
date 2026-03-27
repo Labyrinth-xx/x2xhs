@@ -133,11 +133,8 @@ async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             result["fetched"], result["inserted"], result["scored"],
             len(result.get("candidates", [])),
         )
-        # 缓存候选到 pipeline
-        candidates = result.get("candidates", [])
-        pipeline._last_candidates = candidates
-
         # 只推送未播报过的新候选，已出现过的静默跳过
+        candidates = result.get("candidates", [])
         new_candidates = [
             c for c in candidates
             if c["external_id"] not in pipeline._presented_candidate_ids
@@ -145,6 +142,9 @@ async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not new_candidates:
             logger.info("定时任务：无新候选，静默")
             return
+
+        # 缓存新候选，保证编号与消息一致
+        pipeline._last_candidates = new_candidates
 
         message = pipeline._format_candidates(new_candidates)
         if config.telegram:
