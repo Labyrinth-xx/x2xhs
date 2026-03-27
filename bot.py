@@ -611,10 +611,27 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
 
         elif action == "approve_candidate":
             index = int(params.get("index", 0))
-            if index < 1:
-                await msg.reply_text("请指定候选序号，如「发1」")
+            if index < 1 or not pipeline._last_candidates or index > len(pipeline._last_candidates):
+                await msg.reply_text(f"没找到对应的候选（当前 {len(pipeline._last_candidates)} 条），能再描述一下吗？")
                 return
-            await msg.reply_text(f"⏳ 正在处理第 {index} 条候选...")
+
+            # 二次确认：展示匹配到的推文，等用户确认
+            if not params.get("_confirmed") and context is not None:
+                c = pipeline._last_candidates[index - 1]
+                preview = c["content"][:200].replace("\n", " ")
+                await msg.reply_text(
+                    f"找到这条：\n"
+                    f"@{c['handle']} [{c['filter_score']}分]\n\n"
+                    f"{preview}...\n\n"
+                    f"是这条吗？"
+                )
+                context.user_data[_PENDING_INTENT_KEY] = Intent(
+                    action="approve_candidate",
+                    params={**params, "_confirmed": True},
+                )
+                return
+
+            await msg.reply_text(f"⏳ 正在处理...")
             try:
                 result = await pipeline.process_candidate(index)
                 if result.get("success"):
