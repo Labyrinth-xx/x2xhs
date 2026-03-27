@@ -75,7 +75,10 @@ class RSSHubClient:
     ) -> RawTweet:
         summary = getattr(entry, "summary", "") or getattr(entry, "description", "")
         url = getattr(entry, "link", "")
-        external_id = getattr(entry, "id", url)
+        raw_id = getattr(entry, "id", url)
+        # 统一用纯数字 tweet ID，与 twscrape 一致，避免同一推文两个 external_id
+        status_match = re.search(r"/status/(\d+)", raw_id)
+        external_id = status_match.group(1) if status_match else raw_id
         handle = self._extract_handle(entry, url, source_value, source_type)
         return RawTweet(
             external_id=external_id,

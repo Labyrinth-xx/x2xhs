@@ -64,6 +64,12 @@ class Pipeline:
                 await self._repo.add_keyword(kw)
             logger.info("从 .env 导入初始关键词: %s", list(self._config.scraper.keywords))
         await self._twscrape.setup()
+        # 重启后预填已展示 ID，避免重复推送
+        if not self._presented_candidate_ids:
+            existing = await self._repo.list_scored_candidates(
+                min_score=0, limit=50,
+            )
+            self._presented_candidate_ids = {c["external_id"] for c in existing}
         return self._config.db_path
 
     async def scrape(
@@ -151,9 +157,12 @@ class Pipeline:
         ] if feedback_rows else None
 
         for tweet in unscored:
-            score, reason, detail = await self._scorer.score(
+            result = await self._scorer.score(
                 tweet.handle, tweet.content, feedback_lines,
             )
+            if result is None:
+                continue
+            score, reason, detail = result
             await self._repo.save_score(tweet.external_id, score, reason, detail)
             scored += 1
 
@@ -331,10 +340,13 @@ class Pipeline:
                 for fb in feedback_rows
             ] if feedback_rows else None
             for tweet in unscored:
-                score, reason = await self._scorer.score(
+                result = await self._scorer.score(
                     tweet.handle, tweet.content, feedback_lines,
                 )
-                await self._repo.save_score(tweet.external_id, score, reason)
+                if result is None:
+                    continue
+                score, reason, detail = result
+                await self._repo.save_score(tweet.external_id, score, reason, detail)
 
         candidates = await self._repo.list_candidate_tweets(
             effective_limit,

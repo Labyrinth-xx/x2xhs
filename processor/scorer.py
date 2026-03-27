@@ -31,11 +31,8 @@ class TweetScorer:
         handle: str,
         content: str,
         feedback_lines: list[str] | None = None,
-    ) -> tuple[float, str, dict]:
-        """评分一条推文，返回 (score, reason, detail)。
-
-        score 为加权综合分（保留一位小数），detail 为各维度原始分。
-        """
+    ) -> tuple[float, str, dict] | None:
+        """评分一条推文，返回 (score, reason, detail) 或 None（失败时跳过，下次重试）。"""
         prompt = build_scorer_prompt(handle, content, feedback_lines)
         try:
             response = await self._client.chat.completions.create(
@@ -49,8 +46,8 @@ class TweetScorer:
             text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
             return self._parse_score(text)
         except Exception as exc:
-            logger.warning("评分失败 @%s: %s", handle, exc)
-            return 0.0, f"评分失败: {exc}", {}
+            logger.warning("评分失败 @%s: %s — 下次重试", handle, exc)
+            return None
 
     @classmethod
     def _parse_score(cls, text: str) -> tuple[float, str, dict]:
