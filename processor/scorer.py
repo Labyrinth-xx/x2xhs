@@ -41,8 +41,8 @@ class TweetScorer:
             response = await self._client.chat.completions.create(
                 model=self._config.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=256,
+                temperature=0.2,
+                max_tokens=512,
             )
             text = (response.choices[0].message.content or "").strip()
             # Strip <think> blocks from reasoning models
@@ -61,7 +61,7 @@ class TweetScorer:
         data = json.loads(match.group())
         detail: dict = {}
         for key in cls._WEIGHTS:
-            val = int(data.get(key, 0))
+            val = round(float(data.get(key, 0)), 1)
             if not 1 <= val <= 10:
                 raise ValueError(f"维度 {key} 超出范围 1-10: {val}")
             detail[key] = val

@@ -179,26 +179,48 @@ class Pipeline:
             "message": message,
         }
 
-    def _format_candidates(self, candidates: list[dict]) -> str:
+    def _format_candidates(
+        self,
+        candidates: list[dict],
+        new_ids: set[str] | None = None,
+    ) -> str:
         """格式化候选推文列表为 Telegram 消息。"""
-        lines = ["📋 新候选推文\n"]
+        lines = ["📋 候选推文\n"]
         for c in candidates:
             preview = c["content"][:150].replace("\n", " ")
             source_type = c.get("source_type", "account")
             source_value = c.get("source_value", c["handle"])
             if source_type == "keyword":
-                source_tag = f"（关键词: {source_value}）"
+                source_tag = f" （关键词: {source_value}）"
+            elif source_value != c["handle"]:
+                source_tag = f" （来自 @{source_value}）"
             else:
-                source_tag = f"（来自 @{source_value}）"
+                source_tag = ""
             title_line = f"「{c['preview_title']}」\n" if c.get("preview_title") else ""
+            new_badge = "🆕 " if (new_ids and c["external_id"] in new_ids) else ""
             lines.append(
-                f"📌 [{c['filter_score']}分] @{c['handle']} {source_tag}\n"
+                f"{new_badge}📌 [{c['filter_score']:g}分] @{c['handle']}{source_tag}\n"
                 f"{title_line}"
                 f"{preview}...\n"
                 f"💡 {c['filter_reason']}\n"
             )
-        lines.append("说「发」+描述确认发布，或「跳过」全部放弃")
         return "\n".join(lines)
+
+    @staticmethod
+    def _sort_candidates_new_first(
+        candidates: list[dict],
+        new_ids: set[str],
+    ) -> list[dict]:
+        """新推文置顶，其余按评分降序。"""
+        new = sorted(
+            [c for c in candidates if c["external_id"] in new_ids],
+            key=lambda c: c["filter_score"], reverse=True,
+        )
+        old = sorted(
+            [c for c in candidates if c["external_id"] not in new_ids],
+            key=lambda c: c["filter_score"], reverse=True,
+        )
+        return new + old
 
     async def process_candidate(self, index: int) -> dict:
         """用户确认后处理指定候选：翻译 + 截图 + 覆盖图 → 发送到 Telegram。"""

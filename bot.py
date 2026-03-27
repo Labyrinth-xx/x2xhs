@@ -133,20 +133,21 @@ async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             result["fetched"], result["inserted"], result["scored"],
             len(result.get("candidates", [])),
         )
-        # 只推送未播报过的新候选，已出现过的静默跳过
+        # 识别新候选，无新内容时静默
         candidates = result.get("candidates", [])
-        new_candidates = [
-            c for c in candidates
+        new_ids = {
+            c["external_id"] for c in candidates
             if c["external_id"] not in pipeline._presented_candidate_ids
-        ]
-        if not new_candidates:
+        }
+        if not new_ids:
             logger.info("定时任务：无新候选，静默")
             return
 
-        # 缓存新候选，保证编号与消息一致
-        pipeline._last_candidates = new_candidates
+        # 新推文置顶，其余按分排序；缓存保持与展示一致
+        sorted_candidates = pipeline._sort_candidates_new_first(candidates, new_ids)
+        pipeline._last_candidates = sorted_candidates
 
-        message = pipeline._format_candidates(new_candidates)
+        message = pipeline._format_candidates(sorted_candidates, new_ids=new_ids)
         if config.telegram:
             from telegram import Bot
             bot = Bot(token=config.telegram.bot_token)
@@ -154,7 +155,7 @@ async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 chat_id=config.telegram.chat_id,
                 text=message,
             )
-        for c in new_candidates:
+        for c in sorted_candidates:
             pipeline._presented_candidate_ids.add(c["external_id"])
     except Exception:
         tb = traceback.format_exc()
@@ -483,9 +484,19 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
                 scrape_first=scrape_first,
                 accounts=accounts,
             )
-            pipeline._last_candidates = result.get("candidates", [])
-            message = result.get("message")
-            if message:
+            candidates = result.get("candidates", [])
+            new_ids = {
+                c["external_id"] for c in candidates
+                if c["external_id"] not in pipeline._presented_candidate_ids
+            }
+            sorted_candidates = pipeline._sort_candidates_new_first(candidates, new_ids)
+            pipeline._last_candidates = sorted_candidates
+            for c in sorted_candidates:
+                pipeline._presented_candidate_ids.add(c["external_id"])
+            if sorted_candidates:
+                message = pipeline._format_candidates(
+                    sorted_candidates, new_ids=new_ids or None,
+                )
                 await msg.reply_text(message)
             else:
                 await msg.reply_text(
