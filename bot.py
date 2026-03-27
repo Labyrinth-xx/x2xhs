@@ -401,14 +401,23 @@ async def _build_nl_context(pipeline: Pipeline) -> str:
         accounts = await pipeline.list_accounts()
         counts = await pipeline.status()
         account_str = ", ".join(f"@{a}" for a in accounts) if accounts else "无"
-        candidate_count = pipeline.candidate_count
         threshold = pipeline.threshold
+        candidates = pipeline._last_candidates
+        if candidates:
+            cand_lines = []
+            for i, c in enumerate(candidates, 1):
+                preview = c["content"][:60].replace("\n", " ")
+                cand_lines.append(f"[{i}] @{c['handle']}({c['filter_score']}分): {preview}")
+            candidate_str = "\n".join(cand_lines)
+        else:
+            candidate_str = "无"
         return (
             f"监控账号: {account_str}\n"
             f"tweets={counts.get('tweets', 0)} "
             f"sent={counts.get('sent', 0)} "
             f"filtered={counts.get('filtered', 0)}\n"
-            f"评分阈值={threshold} 当前候选={candidate_count}条"
+            f"评分阈值={threshold}\n"
+            f"当前候选:\n{candidate_str}"
         )
     except Exception:
         return "暂无"

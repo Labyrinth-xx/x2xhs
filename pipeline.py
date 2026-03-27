@@ -182,7 +182,7 @@ class Pipeline:
     def _format_candidates(self, candidates: list[dict]) -> str:
         """格式化候选推文列表为 Telegram 消息。"""
         lines = ["📋 新候选推文\n"]
-        for i, c in enumerate(candidates, 1):
+        for c in candidates:
             preview = c["content"][:80].replace("\n", " ")
             source_type = c.get("source_type", "account")
             source_value = c.get("source_value", c["handle"])
@@ -191,11 +191,11 @@ class Pipeline:
             else:
                 source_tag = f"（来自 @{source_value}）"
             lines.append(
-                f"{i}️⃣ [{c['filter_score']}分] @{c['handle']} {source_tag}\n"
+                f"📌 [{c['filter_score']}分] @{c['handle']} {source_tag}\n"
                 f"{preview}...\n"
                 f"💡 {c['filter_reason']}\n"
             )
-        lines.append("回复序号确认发布（如「发1」），或「跳过」全部放弃")
+        lines.append("说「发」+描述确认发布，或「跳过」全部放弃")
         return "\n".join(lines)
 
     async def process_candidate(self, index: int) -> dict:
