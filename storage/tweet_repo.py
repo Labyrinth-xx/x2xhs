@@ -248,11 +248,18 @@ class TweetRepository:
 
     # ── 评分相关 ──
 
-    async def save_score(self, external_id: str, score: int, reason: str) -> None:
+    async def save_score(
+        self,
+        external_id: str,
+        score: float,
+        reason: str,
+        detail: dict | None = None,
+    ) -> None:
+        detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
         async with self._database.connect() as conn:
             await conn.execute(
-                "UPDATE tweets SET filter_score = ?, filter_reason = ? WHERE external_id = ?",
-                (score, reason, external_id),
+                "UPDATE tweets SET filter_score = ?, filter_reason = ?, filter_scores_detail = ? WHERE external_id = ?",
+                (score, reason, detail_json, external_id),
             )
 
     async def list_unscored_tweets(self, limit: int = 50, published_within_hours: int = 168) -> list[RawTweet]:
@@ -272,7 +279,7 @@ class TweetRepository:
 
     async def list_scored_candidates(
         self,
-        min_score: int,
+        min_score: float,
         limit: int = 5,
     ) -> list[dict]:
         """返回达到阈值、尚未处理的推文（按分数降序）。"""
@@ -363,7 +370,7 @@ class TweetRepository:
         async with self._database.connect() as conn:
             cursor = await conn.execute(
                 """
-                SELECT handle, filter_score, filter_reason,
+                SELECT handle, filter_score, filter_reason, filter_scores_detail,
                        substr(content, 1, 80) AS content_preview,
                        created_at
                 FROM tweets

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 import signal
 import traceback
+
+import json as _json
 
 from telegram import BotCommand, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -20,6 +23,12 @@ logger = logging.getLogger(__name__)
 
 _BOT_DATA_CONFIG_KEY = "config"
 _BOT_DATA_PIPELINE_KEY = "pipeline"
+
+
+def _seconds_until_next_hour() -> float:
+    now = datetime.datetime.now()
+    next_hour = (now + datetime.timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    return (next_hour - now).total_seconds()
 
 
 def _parse_limit(args: list[str]) -> int | None:
@@ -56,15 +65,15 @@ async def _post_init(application: Application) -> None:
     application.bot_data[_BOT_DATA_CONFIG_KEY] = config
     application.bot_data[_BOT_DATA_PIPELINE_KEY] = pipeline
 
-    # 注册定时抓取+评分任务
-    interval_seconds = config.poll_interval_minutes * 60
+    # 注册定时抓取+评分任务，对齐整点
+    first_seconds = _seconds_until_next_hour()
     application.job_queue.run_repeating(
         _auto_score_job,
-        interval=interval_seconds,
-        first=interval_seconds,
+        interval=3600,
+        first=first_seconds,
         name="auto_score",
     )
-    logger.info("定时评分任务已注册，间隔 %d 分钟", config.poll_interval_minutes)
+    logger.info("定时评分任务已注册，下次触发在整点（%.0f 秒后）", first_seconds)
 
     # 注册命令菜单（输入 / 时显示）
     await application.bot.set_my_commands([
@@ -181,15 +190,15 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if jobs:
         await update.effective_message.reply_text("⚠️ 定时任务已在运行中，无需恢复。")
         return
-    interval_seconds = config.poll_interval_minutes * 60
+    first_seconds = _seconds_until_next_hour()
     context.job_queue.run_repeating(
         _auto_score_job,
-        interval=interval_seconds,
-        first=10,
+        interval=3600,
+        first=first_seconds,
         name="auto_score",
     )
     logger.info("定时推送已恢复")
-    await update.effective_message.reply_text("▶️ 定时推送已恢复，10 秒后开始首次执行。")
+    await update.effective_message.reply_text(f"▶️ 定时推送已恢复，将在下一个整点（{int(first_seconds // 60)} 分钟后）执行。")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -289,11 +298,11 @@ async def threshold_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.effective_message.reply_text(f"当前评分阈值: {pipeline.threshold}")
         return
     try:
-        new_val = int(context.args[0])
+        new_val = float(context.args[0])
         if not 1 <= new_val <= 10:
             raise ValueError
     except ValueError:
-        await update.effective_message.reply_text("阈值必须是 1-10 的整数")
+        await update.effective_message.reply_text("阈值必须是 1-10 的数字（支持小数，如 7.5）")
         return
     await pipeline.set_threshold(new_val)
     await update.effective_message.reply_text(f"✅ 评分阈值已调整为 {new_val}")
@@ -309,9 +318,23 @@ async def scores_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     lines = ["📊 最近评分：\n"]
     for s in scores:
+        detail_str = ""
+        raw_detail = s.get("filter_scores_detail")
+        if raw_detail:
+            try:
+                d = _json.loads(raw_detail)
+                detail_str = (
+                    f"  📐 信息差{d.get('info_diff','?')} "
+                    f"纵深{d.get('depth','?')} "
+                    f"眼光{d.get('angle','?')} "
+                    f"势能{d.get('viral','?')}\n"
+                )
+            except Exception:
+                pass
         lines.append(
             f"[{s['filter_score']}分] @{s['handle']}\n"
             f"  {s['content_preview']}...\n"
+            f"{detail_str}"
             f"  💡 {s['filter_reason']}\n"
         )
     await update.effective_message.reply_text("\n".join(lines))
@@ -475,14 +498,14 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
                 if jobs:
                     await msg.reply_text("⚠️ 定时任务已在运行中，无需恢复。")
                 else:
-                    interval_seconds = config.poll_interval_minutes * 60
+                    first_seconds = _seconds_until_next_hour()
                     context.job_queue.run_repeating(
                         _auto_score_job,
-                        interval=interval_seconds,
-                        first=10,
+                        interval=3600,
+                        first=first_seconds,
                         name="auto_score",
                     )
-                    await msg.reply_text("▶️ 定时推送已恢复，10 秒后开始首次执行。")
+                    await msg.reply_text(f"▶️ 定时推送已恢复，将在下一个整点（{int(first_seconds // 60)} 分钟后）执行。")
 
         elif action == "scrape":
             accounts = params.get("accounts") or None
@@ -530,11 +553,11 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
                 await msg.reply_text(f"当前评分阈值: {pipeline.threshold}")
                 return
             try:
-                new_val = int(value)
+                new_val = float(value)
                 if not 1 <= new_val <= 10:
                     raise ValueError
             except (ValueError, TypeError):
-                await msg.reply_text("阈值必须是 1-10 的整数")
+                await msg.reply_text("阈值必须是 1-10 的数字（支持小数，如 7.5）")
                 return
             await pipeline.set_threshold(new_val)
             await msg.reply_text(f"✅ 评分阈值已调整为 {new_val}")
@@ -546,9 +569,23 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
             else:
                 lines = ["📊 最近评分：\n"]
                 for s in scores:
+                    detail_str = ""
+                    raw_detail = s.get("filter_scores_detail")
+                    if raw_detail:
+                        try:
+                            d = _json.loads(raw_detail)
+                            detail_str = (
+                                f"  📐 信息差{d.get('info_diff','?')} "
+                                f"纵深{d.get('depth','?')} "
+                                f"眼光{d.get('angle','?')} "
+                                f"势能{d.get('viral','?')}\n"
+                            )
+                        except Exception:
+                            pass
                     lines.append(
                         f"[{s['filter_score']}分] @{s['handle']}\n"
                         f"  {s['content_preview']}...\n"
+                        f"{detail_str}"
                         f"  💡 {s['filter_reason']}\n"
                     )
                 await msg.reply_text("\n".join(lines))

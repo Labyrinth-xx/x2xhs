@@ -27,6 +27,14 @@ def _parse_int(name: str, default: str) -> int:
         raise ValueError(f"{name} 必须是整数，当前值: {value!r}") from exc
 
 
+def _parse_float(name: str, default: str) -> float:
+    value = os.getenv(name, default).strip()
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是数字，当前值: {value!r}") from exc
+
+
 def _parse_max_tweets() -> int:
     value = os.getenv("SCRAPER_MAX_TWEETS", "20").strip()
     try:
@@ -76,7 +84,7 @@ class TelegramConfig:
 
 @dataclass(frozen=True, slots=True)
 class FilterConfig:
-    threshold: int = 7
+    threshold: float = 7.5
     model: str = "deepseek/deepseek-chat"
     expire_hours: int = 72
 
@@ -131,7 +139,7 @@ def load_config() -> AppConfig:
         else None
     )
     filter_cfg = FilterConfig(
-        threshold=_parse_int("FILTER_THRESHOLD", "7"),
+        threshold=_parse_float("FILTER_THRESHOLD", "7.5"),
         model=os.getenv("FILTER_MODEL", "deepseek/deepseek-chat").strip(),
         expire_hours=_parse_int("FILTER_EXPIRE_HOURS", "72"),
     )

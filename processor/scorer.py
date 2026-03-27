@@ -23,13 +23,19 @@ class TweetScorer:
         )
         self._config = config
 
+    # 各维度权重
+    _WEIGHTS = {"info_diff": 0.35, "depth": 0.25, "angle": 0.20, "viral": 0.20}
+
     async def score(
         self,
         handle: str,
         content: str,
         feedback_lines: list[str] | None = None,
-    ) -> tuple[int, str]:
-        """评分一条推文，返回 (score, reason)。"""
+    ) -> tuple[float, str, dict]:
+        """评分一条推文，返回 (score, reason, detail)。
+
+        score 为加权综合分（保留一位小数），detail 为各维度原始分。
+        """
         prompt = build_scorer_prompt(handle, content, feedback_lines)
         try:
             response = await self._client.chat.completions.create(
@@ -44,17 +50,22 @@ class TweetScorer:
             return self._parse_score(text)
         except Exception as exc:
             logger.warning("评分失败 @%s: %s", handle, exc)
-            return 0, f"评分失败: {exc}"
+            return 0.0, f"评分失败: {exc}", {}
 
-    @staticmethod
-    def _parse_score(text: str) -> tuple[int, str]:
-        """从 LLM 返回的 JSON 中提取 score 和 reason。"""
+    @classmethod
+    def _parse_score(cls, text: str) -> tuple[float, str, dict]:
+        """从 LLM 返回的 JSON 中提取分维度分数并计算加权综合分。"""
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
             raise ValueError(f"评分返回中未找到 JSON: {text[:200]}")
         data = json.loads(match.group())
-        score = int(data.get("score", 0))
+        detail: dict = {}
+        for key in cls._WEIGHTS:
+            val = int(data.get(key, 0))
+            if not 1 <= val <= 10:
+                raise ValueError(f"维度 {key} 超出范围 1-10: {val}")
+            detail[key] = val
+        weighted = sum(detail[k] * w for k, w in cls._WEIGHTS.items())
+        score = round(weighted, 1)
         reason = str(data.get("reason", ""))
-        if not 1 <= score <= 10:
-            raise ValueError(f"评分超出范围 1-10: {score}")
-        return score, reason
+        return score, reason, detail

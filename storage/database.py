@@ -92,7 +92,7 @@ class Database:
             except Exception:
                 pass  # Column already exists — safe to ignore
             # Migration: add filter_score / filter_reason to tweets (idempotent)
-            for col, col_type in [("filter_score", "INTEGER"), ("filter_reason", "TEXT")]:
+            for col, col_type in [("filter_score", "REAL"), ("filter_reason", "TEXT"), ("filter_scores_detail", "TEXT")]:
                 try:
                     await conn.execute(f"ALTER TABLE tweets ADD COLUMN {col} {col_type}")
                 except Exception:

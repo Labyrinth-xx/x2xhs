@@ -32,7 +32,7 @@ class Pipeline:
         self._translator = ClaudeTranslator(config.processor)
         self._scorer = TweetScorer(config.processor.openrouter_api_key, config.filter)
         self._formatter = ContentFormatter()
-        self._threshold_override: int | None = None
+        self._threshold_override: float | None = None
         self._last_candidates: list[dict] = []
         self._overlayer = TweetImageOverlayer()
         self._screenshotter = TweetScreenshotter(
@@ -146,10 +146,10 @@ class Pipeline:
         ] if feedback_rows else None
 
         for tweet in unscored:
-            score, reason = await self._scorer.score(
+            score, reason, detail = await self._scorer.score(
                 tweet.handle, tweet.content, feedback_lines,
             )
-            await self._repo.save_score(tweet.external_id, score, reason)
+            await self._repo.save_score(tweet.external_id, score, reason, detail)
             scored += 1
 
         # 过期清理
@@ -179,8 +179,14 @@ class Pipeline:
         lines = ["📋 新候选推文\n"]
         for i, c in enumerate(candidates, 1):
             preview = c["content"][:80].replace("\n", " ")
+            source_type = c.get("source_type", "account")
+            source_value = c.get("source_value", c["handle"])
+            if source_type == "keyword":
+                source_tag = f"（关键词: {source_value}）"
+            else:
+                source_tag = f"（来自 @{source_value}）"
             lines.append(
-                f"{i}️⃣ [{c['filter_score']}分] @{c['handle']}\n"
+                f"{i}️⃣ [{c['filter_score']}分] @{c['handle']} {source_tag}\n"
                 f"{preview}...\n"
                 f"💡 {c['filter_reason']}\n"
             )
@@ -239,7 +245,7 @@ class Pipeline:
         return await self._repo.list_recent_scores(limit)
 
     @property
-    def threshold(self) -> int:
+    def threshold(self) -> float:
         if self._threshold_override is not None:
             return self._threshold_override
         return self._config.filter.threshold
@@ -248,7 +254,7 @@ class Pipeline:
     def candidate_count(self) -> int:
         return len(self._last_candidates)
 
-    async def set_threshold(self, value: int) -> None:
+    async def set_threshold(self, value: float) -> None:
         """运行时调整评分阈值（不持久化到 .env，重启恢复默认）。"""
         self._threshold_override = value
 
