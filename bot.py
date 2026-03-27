@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import re
 import signal
 import traceback
 
@@ -695,6 +696,11 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
         await msg.reply_text(f"❌ 执行出错：{exc}")
 
 
+_CONFIRM_YES = re.compile(r"^(确认|是|好|好的|可以|执行|对|嗯|行|ok|yes|✓)[\s!！。]*$", re.IGNORECASE)
+_CONFIRM_NO = re.compile(r"^(取消|不|算了|不了|不要|不用|no|cancel|×)[\s!！。]*$", re.IGNORECASE)
+_PENDING_INTENT_KEY = "pending_intent"
+
+
 async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config, pipeline = _get_pipeline(context)
     if not await _ensure_allowed(update, config):
@@ -703,6 +709,20 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
     text = (update.effective_message.text or "").strip()
     if not text:
         return
+
+    # ── 处理待确认的 intent ──
+    pending: Intent | None = context.user_data.get(_PENDING_INTENT_KEY)
+    if pending is not None:
+        if _CONFIRM_YES.match(text):
+            del context.user_data[_PENDING_INTENT_KEY]
+            await update.effective_chat.send_action("typing")
+            await _execute_intent(update, pipeline, pending, context)
+            return
+        elif _CONFIRM_NO.match(text):
+            del context.user_data[_PENDING_INTENT_KEY]
+            await update.effective_message.reply_text("已取消。")
+            return
+        # 其他内容视为新指令，覆盖 pending
 
     await update.effective_chat.send_action("typing")
 
@@ -713,6 +733,12 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
         model=_BOT_MODEL,
         context=ctx,
     )
+
+    if intent.needs_confirm:
+        context.user_data[_PENDING_INTENT_KEY] = intent
+        confirm_text = intent.reply or f"要执行「{intent.action}」吗？"
+        await update.effective_message.reply_text(f"{confirm_text}\n\n回复「确认」执行，「取消」放弃。")
+        return
 
     if intent.reply and intent.action != "chat":
         await update.effective_message.reply_text(intent.reply)
