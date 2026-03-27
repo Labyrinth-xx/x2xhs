@@ -68,4 +68,7 @@ class TweetScorer:
         weighted = sum(detail[k] * w for k, w in cls._WEIGHTS.items())
         score = round(weighted, 1)
         reason = str(data.get("reason", ""))
+        preview_title = str(data.get("preview_title", "")).strip()
+        if preview_title:
+            detail["preview_title"] = preview_title
         return score, reason, detail

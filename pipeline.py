@@ -190,8 +190,10 @@ class Pipeline:
                 source_tag = f"（关键词: {source_value}）"
             else:
                 source_tag = f"（来自 @{source_value}）"
+            title_line = f"「{c['preview_title']}」\n" if c.get("preview_title") else ""
             lines.append(
                 f"📌 [{c['filter_score']}分] @{c['handle']} {source_tag}\n"
+                f"{title_line}"
                 f"{preview}...\n"
                 f"💡 {c['filter_reason']}\n"
             )

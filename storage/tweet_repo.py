@@ -255,11 +255,12 @@ class TweetRepository:
         reason: str,
         detail: dict | None = None,
     ) -> None:
+        preview_title = detail.pop("preview_title", None) if detail else None
         detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
         async with self._database.connect() as conn:
             await conn.execute(
-                "UPDATE tweets SET filter_score = ?, filter_reason = ?, filter_scores_detail = ? WHERE external_id = ?",
-                (score, reason, detail_json, external_id),
+                "UPDATE tweets SET filter_score = ?, filter_reason = ?, filter_scores_detail = ?, preview_title = ? WHERE external_id = ?",
+                (score, reason, detail_json, preview_title, external_id),
             )
 
     async def list_unscored_tweets(self, limit: int = 50, published_within_hours: int = 168) -> list[RawTweet]:
@@ -288,7 +289,7 @@ class TweetRepository:
                 """
                 SELECT t.external_id, t.handle, t.content, t.url,
                        t.published_at, t.filter_score, t.filter_reason,
-                       t.source_type, t.source_value, t.image_urls
+                       t.source_type, t.source_value, t.image_urls, t.preview_title
                 FROM tweets t
                 LEFT JOIN processed_content p
                     ON p.tweet_external_id = t.external_id
