@@ -183,7 +183,7 @@ class Pipeline:
         """格式化候选推文列表为 Telegram 消息。"""
         lines = ["📋 新候选推文\n"]
         for c in candidates:
-            preview = c["content"][:80].replace("\n", " ")
+            preview = c["content"][:150].replace("\n", " ")
             source_type = c.get("source_type", "account")
             source_value = c.get("source_value", c["handle"])
             if source_type == "keyword":
