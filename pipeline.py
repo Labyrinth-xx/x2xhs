@@ -544,7 +544,7 @@ class Pipeline:
 
         tags_text = "  ".join(f"#{t}" for t in digest.tags)
         message = (
-            f"📰 话题综述：{keyword}\n\n"
+            f"📰 {keyword}\n\n"
             f"【{digest.title_zh}】\n\n"
             f"{digest.body_zh}\n\n"
             f"{tags_text}"
@@ -553,13 +553,12 @@ class Pipeline:
             sources = "\n".join(f"- {u}" for u in digest.citation_urls[:5])
             message += f"\n\n来源：\n{sources}"
 
-        await self._telegram.send_text(message)
-
         return {
             "success": True,
             "keyword": keyword,
             "title": digest.title_zh,
             "body_length": len(digest.body_zh),
+            "message": message,
         }
 
     def _cleanup_images(self, images: list[str] | object) -> None:

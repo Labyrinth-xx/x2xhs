@@ -246,10 +246,7 @@ async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text(f"⏳ 正在生成「{keyword}」话题综述，约需 15-30 秒...")
     result = await pipeline.topic_digest(keyword)
     if result["success"]:
-        await update.effective_message.reply_text(
-            f"✅ 综述已发送到 Telegram\n"
-            f"关键词：{result['keyword']}  标题：{result['title']}  字数：{result['body_length']}"
-        )
+        await update.effective_message.reply_text(result["message"])
     else:
         await update.effective_message.reply_text(f"❌ 生成失败：{result['reason']}")
 
@@ -595,9 +592,7 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
             await msg.reply_text(f"⏳ 正在生成「{keyword}」话题综述，约需 15-30 秒...")
             result = await pipeline.topic_digest(keyword)
             if result["success"]:
-                await msg.reply_text(
-                    f"✅ 综述已发送\n关键词：{result['keyword']}  标题：{result['title']}  字数：{result['body_length']}"
-                )
+                await msg.reply_text(result["message"])
             else:
                 await msg.reply_text(f"❌ 生成失败：{result['reason']}")
 
