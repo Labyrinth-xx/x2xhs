@@ -38,6 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
     remove_kw_parser = subparsers.add_parser("remove-keyword", help="删除监控关键词")
     remove_kw_parser.add_argument("keyword", help="关键词")
 
+    viral_parser = subparsers.add_parser("viral", help="关键词爆文搜索：找最有价值的单条推文并发送到 Telegram")
+    viral_parser.add_argument("--keyword", required=True, help="搜索关键词")
+
+    digest_parser = subparsers.add_parser("digest", help="话题综述：用 xAI 生成关键词领域的中文综述文章")
+    digest_parser.add_argument("--keyword", required=True, help="搜索关键词")
+
     return parser
 
 
@@ -99,6 +105,30 @@ async def run_command(args: argparse.Namespace) -> int:
             console.print(f"[green]已删除关键词[/green] {args.keyword}")
         else:
             console.print(f"[yellow]未找到关键词[/yellow] {args.keyword}")
+        return 0
+
+    if args.command == "viral":
+        result = await pipeline.keyword_viral(args.keyword)
+        if result["success"]:
+            console.print(
+                f"[green]爆文发送成功[/green] "
+                f"@{result['handle']} | {result['title']} "
+                f"（来源: {result.get('source', '?')}）"
+            )
+        else:
+            console.print(f"[red]爆文搜索失败[/red] {result['reason']}")
+        return 0
+
+    if args.command == "digest":
+        result = await pipeline.topic_digest(args.keyword)
+        if result["success"]:
+            console.print(
+                f"[green]话题综述已发送到 Telegram[/green] "
+                f"关键词: {result['keyword']} | 标题: {result['title']} | "
+                f"字数: {result['body_length']}"
+            )
+        else:
+            console.print(f"[red]话题综述生成失败[/red] {result['reason']}")
         return 0
 
     raise ValueError(f"未知命令: {args.command}")

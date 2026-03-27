@@ -41,14 +41,20 @@ class TwscrapeClient:
     def _is_configured(self) -> bool:
         return bool(self._config.twitter_auth_token and self._config.twitter_ct0)
 
-    async def fetch_keyword_tweets(self, keyword: str) -> list[RawTweet]:
+    async def fetch_keyword_tweets(
+        self,
+        keyword: str,
+        min_faves_override: int | None = None,
+        limit: int | None = None,
+    ) -> list[RawTweet]:
         if not self._is_configured():
             logger.warning("未配置 TWSCRAPE_AUTH_TOKEN/CT0，跳过关键词 [%s]", keyword)
             return []
 
+        min_faves = min_faves_override if min_faves_override is not None else self._config.min_faves
         query = (
             f"{keyword} "
-            f"min_faves:{self._config.min_faves} "
+            f"min_faves:{min_faves} "
             f"min_retweets:{self._config.min_retweets} "
             f"-filter:retweets"
         )
@@ -125,6 +131,8 @@ class TwscrapeClient:
         # Use the last captured response (may contain more results after scroll)
         data = captured[-1]
         tweets = self._parse_response(data, keyword)
+        if limit is not None:
+            tweets = tweets[:limit]
         logger.info("关键词 [%s] 抓取到 %d 条推文", keyword, len(tweets))
         return tweets
 

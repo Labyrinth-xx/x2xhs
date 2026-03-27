@@ -34,3 +34,12 @@ class ProcessedContent:
     mode: str = "light"
     status: ProcessedStatus = ProcessedStatus.SENT
     pushed_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DigestContent:
+    keyword: str
+    title_zh: str
+    body_zh: str
+    tags: tuple[str, ...]
+    citation_urls: tuple[str, ...] = ()

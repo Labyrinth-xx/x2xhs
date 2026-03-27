@@ -8,13 +8,15 @@ from config import AppConfig
 from processor.content_formatter import ContentFormatter
 from processor.scorer import TweetScorer
 from processor.translator import ClaudeTranslator, TranslationSkipped
+from processor.viral_selector import ViralSelector
 from publisher.image_overlay import TweetImageOverlayer
 from publisher.telegram_notifier import TelegramNotifier
 from scraper.image_downloader import ImageDownloader
-from scraper.models import ProcessedContent, RawTweet
+from scraper.models import DigestContent, ProcessedContent, RawTweet
 from scraper.rsshub_client import RSSHubClient
 from scraper.twscrape_client import TwscrapeClient
 from scraper.tweet_screenshotter import TweetScreenshotter
+from scraper.xai_client import XAIClient
 from storage.database import Database
 from storage.tweet_repo import TweetRepository
 
@@ -41,6 +43,8 @@ class Pipeline:
         )
         self._downloader = ImageDownloader(output_dir=config.publisher.image_dir)
         self._telegram = TelegramNotifier(config.telegram) if config.telegram else None
+        self._xai = XAIClient(config.xai, config.processor.openrouter_api_key) if config.xai else None
+        self._viral_selector = ViralSelector(config.processor)
 
     async def setup(self) -> Path:
         self._config.data_dir.mkdir(parents=True, exist_ok=True)
@@ -438,6 +442,122 @@ class Pipeline:
         except Exception:
             self._cleanup_images(created_paths)
             raise
+
+    # ── 功能一：关键词爆文搜索 ──
+
+    async def keyword_viral(self, keyword: str) -> dict:
+        """按关键词找最有价值的单条推文，翻译截图后发送到 Telegram。
+
+        流程：twscrape 高阈值预筛 → AI 质量选择 → 翻译截图 → Telegram。
+        twscrape 失效时自动降级为 xAI x_search。
+        """
+        await self.setup()
+
+        if self._telegram is None:
+            raise ValueError("未配置 Telegram，请检查 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID")
+
+        viral_min_faves = (
+            self._config.xai.viral_min_faves if self._config.xai else 500
+        )
+        viral_limit = (
+            self._config.xai.viral_candidate_limit if self._config.xai else 15
+        )
+
+        # Step 1: twscrape 高阈值预筛
+        candidates: list[RawTweet] = []
+        try:
+            original_min_faves = self._config.scraper.min_faves
+            # 临时构造高阈值查询（直接调底层方法）
+            candidates = await self._twscrape.fetch_keyword_tweets(
+                keyword, min_faves_override=viral_min_faves, limit=viral_limit
+            )
+            logger.info("twscrape 抓到 %d 条候选（关键词: %s）", len(candidates), keyword)
+        except Exception as exc:
+            logger.warning("twscrape 预筛失败: %s", exc)
+
+        # Step 2: 降级 — xAI x_search
+        if not candidates:
+            if self._xai is None:
+                return {"success": False, "reason": "twscrape 无结果且未配置 XAI_MODEL"}
+            logger.info("降级到 xAI x_search（关键词: %s）", keyword)
+            try:
+                candidates = await self._xai.search_viral_fallback(keyword, n=viral_limit)
+            except Exception as exc:
+                logger.error("xAI viral_fallback 失败: %s", exc)
+                return {"success": False, "reason": f"xAI 搜索失败: {exc}"}
+
+        if not candidates:
+            return {"success": False, "reason": f"关键词 [{keyword}] 未找到候选推文"}
+
+        # Step 3: AI 质量选择
+        selected = await self._viral_selector.select_best_tweet(keyword, candidates)
+
+        # Step 4: 保存到 DB
+        await self._repo.save_tweets([selected])
+
+        # Step 5: 翻译
+        text_only = _URL_RE.sub("", selected.content).strip()
+        if len(text_only) < self._MIN_TRANSLATABLE_CHARS:
+            return {"success": False, "reason": "选中推文内容太短"}
+
+        try:
+            translated = await self._translator.translate(selected)
+            content = self._formatter.format(translated)
+        except TranslationSkipped as exc:
+            return {"success": False, "reason": f"翻译跳过: {exc.reason}"}
+        except Exception as exc:
+            return {"success": False, "reason": f"翻译失败: {exc}"}
+
+        # Step 6: 截图 + 发送
+        payload = await self._build_payload(content, selected)
+        await self._telegram.notify_content(payload)
+        await self._repo.save_sent(content)
+        self._cleanup_images(payload.get("cleanup_paths", []))
+
+        return {
+            "success": True,
+            "title": content.title_zh,
+            "handle": selected.handle,
+            "source": "twscrape" if selected.source_type == "keyword" else "xai",
+        }
+
+    # ── 功能二：话题综述 ──
+
+    async def topic_digest(self, keyword: str) -> dict:
+        """用 xAI 搜索 X + 网络新闻，生成中文话题综述，发送到 Telegram 待审。"""
+        await self.setup()
+
+        if self._xai is None:
+            return {"success": False, "reason": "未配置 XAI_MODEL，话题综述需要 xAI"}
+
+        if self._telegram is None:
+            raise ValueError("未配置 Telegram，请检查 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID")
+
+        try:
+            digest = await self._xai.search_digest(keyword)
+        except Exception as exc:
+            logger.error("xAI search_digest 失败: %s", exc)
+            return {"success": False, "reason": f"xAI 生成失败: {exc}"}
+
+        tags_text = "  ".join(f"#{t}" for t in digest.tags)
+        message = (
+            f"📰 话题综述：{keyword}\n\n"
+            f"【{digest.title_zh}】\n\n"
+            f"{digest.body_zh}\n\n"
+            f"{tags_text}"
+        )
+        if digest.citation_urls:
+            sources = "\n".join(f"- {u}" for u in digest.citation_urls[:5])
+            message += f"\n\n来源：\n{sources}"
+
+        await self._telegram.send_text(message)
+
+        return {
+            "success": True,
+            "keyword": keyword,
+            "title": digest.title_zh,
+            "body_length": len(digest.body_zh),
+        }
 
     def _cleanup_images(self, images: list[str] | object) -> None:
         for image_str in images if isinstance(images, list) else []:

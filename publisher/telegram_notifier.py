@@ -34,6 +34,10 @@ class TelegramNotifier:
         if images:
             await self._send_images(images)
 
+    async def send_text(self, text: str) -> None:
+        """发送纯文字消息（供外部调用）。"""
+        await self._send_message(text)
+
     async def _send_message(self, text: str) -> None:
         await self._post("sendMessage", data={"chat_id": self._config.chat_id, "text": text})
 

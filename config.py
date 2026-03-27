@@ -90,6 +90,13 @@ class FilterConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class XAIConfig:
+    model: str = "x-ai/grok-4-fast"
+    viral_min_faves: int = 500
+    viral_candidate_limit: int = 15
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     root_dir: Path
     data_dir: Path
@@ -100,6 +107,7 @@ class AppConfig:
     telegram: TelegramConfig | None
     filter: FilterConfig = FilterConfig()
     poll_interval_minutes: int = 60
+    xai: XAIConfig | None = None
 
 
 def load_config() -> AppConfig:
@@ -144,6 +152,16 @@ def load_config() -> AppConfig:
         expire_hours=_parse_int("FILTER_EXPIRE_HOURS", "72"),
     )
     poll_interval = _parse_int("POLL_INTERVAL_MINUTES", "60")
+    xai_model = os.getenv("XAI_MODEL", "").strip()
+    xai_cfg = (
+        XAIConfig(
+            model=xai_model,
+            viral_min_faves=_parse_int("VIRAL_MIN_FAVES", "500"),
+            viral_candidate_limit=_parse_int("VIRAL_CANDIDATE_LIMIT", "15"),
+        )
+        if xai_model
+        else None
+    )
     return AppConfig(
         root_dir=root_dir,
         data_dir=data_dir,
@@ -154,4 +172,5 @@ def load_config() -> AppConfig:
         telegram=telegram,
         filter=filter_cfg,
         poll_interval_minutes=poll_interval,
+        xai=xai_cfg,
     )

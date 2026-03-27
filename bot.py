@@ -86,6 +86,8 @@ async def _post_init(application: Application) -> None:
         BotCommand("remove", "删除监控账号"),
         BotCommand("keywords", "监控关键词列表"),
         BotCommand("status", "查看系统状态"),
+        BotCommand("viral", "关键词爆文搜索"),
+        BotCommand("digest", "话题综述（xAI）"),
         BotCommand("pause", "暂停自动推送"),
         BotCommand("resume", "恢复自动推送"),
         BotCommand("off", "🛑 紧急停止 bot"),
@@ -201,6 +203,46 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text(f"▶️ 定时推送已恢复，将在下一个整点（{int(first_seconds // 60)} 分钟后）执行。")
 
 
+async def viral_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """关键词爆文搜索：/viral <关键词>"""
+    config, pipeline = _get_pipeline(context)
+    if not await _ensure_allowed(update, config):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("用法: /viral <关键词>\n例如: /viral AI agents")
+        return
+    keyword = " ".join(context.args)
+    await update.effective_message.reply_text(f"⏳ 正在搜索关键词「{keyword}」的爆文...")
+    result = await pipeline.keyword_viral(keyword)
+    if result["success"]:
+        await update.effective_message.reply_text(
+            f"✅ 已发送 @{result['handle']} 的推文（来源: {result.get('source', '?')}）\n"
+            f"标题：{result['title']}"
+        )
+    else:
+        await update.effective_message.reply_text(f"❌ 搜索失败：{result['reason']}")
+
+
+async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """话题综述：/digest <关键词>"""
+    config, pipeline = _get_pipeline(context)
+    if not await _ensure_allowed(update, config):
+        return
+    if not context.args:
+        await update.effective_message.reply_text("用法: /digest <关键词>\n例如: /digest AI agents")
+        return
+    keyword = " ".join(context.args)
+    await update.effective_message.reply_text(f"⏳ 正在生成「{keyword}」话题综述，约需 15-30 秒...")
+    result = await pipeline.topic_digest(keyword)
+    if result["success"]:
+        await update.effective_message.reply_text(
+            f"✅ 综述已发送到 Telegram\n"
+            f"关键词：{result['keyword']}  标题：{result['title']}  字数：{result['body_length']}"
+        )
+    else:
+        await update.effective_message.reply_text(f"❌ 生成失败：{result['reason']}")
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config, _ = _get_pipeline(context)
     if not await _ensure_allowed(update, config):
@@ -213,6 +255,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "/scores 查看最近评分",
             "/threshold [n] 查看/调整评分阈值",
             "/feedback <内容> 给评分器反馈偏好",
+            "",
+            "/viral <关键词> 关键词爆文搜索",
+            "/digest <关键词> 话题综述（需 XAI_API_KEY）",
             "",
             "/accounts 查看监控账号",
             "/add <handle> 添加账号",
@@ -665,6 +710,8 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("feedback", feedback_command))
     application.add_handler(CommandHandler("threshold", threshold_command))
     application.add_handler(CommandHandler("scores", scores_command))
+    application.add_handler(CommandHandler("viral", viral_command))
+    application.add_handler(CommandHandler("digest", digest_command))
     application.add_handler(CommandHandler("off", off_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_natural_language))
     application.add_error_handler(_handle_error)
