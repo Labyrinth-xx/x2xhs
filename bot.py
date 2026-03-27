@@ -552,6 +552,35 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
                     )
                     await msg.reply_text(f"▶️ 定时推送已恢复，将在下一个整点（{int(first_seconds // 60)} 分钟后）执行。")
 
+        elif action == "viral":
+            keyword = str(params.get("keyword", "")).strip()
+            if not keyword:
+                await msg.reply_text("请告诉我要搜索哪个关键词，比如「AI agents 爆文」")
+                return
+            await msg.reply_text(f"⏳ 正在搜索「{keyword}」的爆文...")
+            result = await pipeline.keyword_viral(keyword)
+            if result["success"]:
+                await msg.reply_text(
+                    f"✅ 已发送 @{result['handle']} 的推文（来源: {result.get('source', '?')}）\n"
+                    f"标题：{result['title']}"
+                )
+            else:
+                await msg.reply_text(f"❌ 搜索失败：{result['reason']}")
+
+        elif action == "digest":
+            keyword = str(params.get("keyword", "")).strip()
+            if not keyword:
+                await msg.reply_text("请告诉我要综述哪个关键词，比如「AI agents 综述」")
+                return
+            await msg.reply_text(f"⏳ 正在生成「{keyword}」话题综述，约需 15-30 秒...")
+            result = await pipeline.topic_digest(keyword)
+            if result["success"]:
+                await msg.reply_text(
+                    f"✅ 综述已发送\n关键词：{result['keyword']}  标题：{result['title']}  字数：{result['body_length']}"
+                )
+            else:
+                await msg.reply_text(f"❌ 生成失败：{result['reason']}")
+
         elif action == "scrape":
             accounts = params.get("accounts") or None
             keywords = params.get("keywords") or None
