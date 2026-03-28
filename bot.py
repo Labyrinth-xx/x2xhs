@@ -706,6 +706,25 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
             else:
                 await msg.reply_text(f"❌ 生成失败：{result['reason']}")
 
+        elif action == "discover_fun":
+            n = int(params.get("n", 1))
+            await msg.reply_text("⏳ 正在搜索本周趣文，约需 15 秒...")
+            results = await pipeline.discover_fun_tweets(n=n)
+            if not results:
+                await msg.reply_text("❌ 未找到趣文（xAI 未返回内容或未配置）")
+                return
+            pipeline._last_candidates = results
+            lines = ["🎭 本周趣文发现（xAI 精选）\n"]
+            for i, r in enumerate(results, 1):
+                lines.append(f"[{i}] @{r['handle']}")
+                lines.append(r["content"][:200])
+                if r.get("fun_point"):
+                    lines.append(f"💡 {r['fun_point']}")
+                lines.append(r["url"])
+                lines.append("")
+            lines.append("回复「发1」可审核翻译并发到小红书")
+            await msg.reply_text("\n".join(lines))
+
         elif action == "scrape":
             accounts = params.get("accounts") or None
             keywords = params.get("keywords") or None
