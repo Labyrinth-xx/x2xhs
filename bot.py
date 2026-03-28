@@ -108,6 +108,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("status", "查看系统状态"),
         BotCommand("viral", "关键词爆文搜索"),
         BotCommand("digest", "话题综述（xAI）"),
+        BotCommand("fun", "立即发现本周趣文"),
         BotCommand("pause", "暂停自动推送"),
         BotCommand("resume", "恢复自动推送"),
         BotCommand("off", "🛑 紧急停止 bot"),
@@ -313,6 +314,37 @@ async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text(f"❌ 生成失败：{result['reason']}")
 
 
+async def fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """立即触发趣文发现：/fun [n]"""
+    config, pipeline = _get_pipeline(context)
+    if not await _ensure_allowed(update, config):
+        return
+    n = 1
+    if context.args:
+        try:
+            n = int(context.args[0])
+        except ValueError:
+            pass
+    await update.effective_message.reply_text("⏳ 正在搜索本周趣文，约需 15 秒...")
+    results = await pipeline.discover_fun_tweets(n=n)
+    if not results:
+        await update.effective_message.reply_text("❌ 未找到趣文（xAI 未返回内容或未配置）")
+        return
+
+    pipeline._last_candidates = results
+
+    lines = ["🎭 本周趣文发现（xAI 精选）\n"]
+    for i, r in enumerate(results, 1):
+        lines.append(f"[{i}] @{r['handle']}")
+        lines.append(r["content"][:200])
+        if r.get("fun_point"):
+            lines.append(f"💡 {r['fun_point']}")
+        lines.append(r["url"])
+        lines.append("")
+    lines.append("回复「发1」可审核翻译并发到小红书")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config, _ = _get_pipeline(context)
     if not await _ensure_allowed(update, config):
@@ -328,6 +360,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "",
             "/viral <关键词> 关键词爆文搜索",
             "/digest <关键词> 话题综述（需 XAI_API_KEY）",
+            "/fun [n] 立即发现本周趣文（默认 1 条）",
             "",
             "/accounts 查看监控账号",
             "/add <handle> 添加账号",
@@ -875,6 +908,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("scores", scores_command))
     application.add_handler(CommandHandler("viral", viral_command))
     application.add_handler(CommandHandler("digest", digest_command))
+    application.add_handler(CommandHandler("fun", fun_command))
     application.add_handler(CommandHandler("off", off_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_natural_language))
     application.add_error_handler(_handle_error)
