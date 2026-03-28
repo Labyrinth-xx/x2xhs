@@ -32,6 +32,15 @@ def _seconds_until_next_hour() -> float:
     return (next_hour - now).total_seconds()
 
 
+def _seconds_until_next_monday_9am() -> float:
+    now = datetime.datetime.now()
+    days_ahead = (7 - now.weekday()) % 7 or 7  # 0=Monday，今天若是周一则等下周
+    target = (now + datetime.timedelta(days=days_ahead)).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
+    return (target - now).total_seconds()
+
+
 def _parse_limit(args: list[str]) -> int | None:
     if not args:
         return None
@@ -75,6 +84,16 @@ async def _post_init(application: Application) -> None:
         name="auto_score",
     )
     logger.info("定时评分任务已注册，下次触发在整点（%.0f 秒后）", first_seconds)
+
+    # 注册每周趣文发现任务（每周一 9:00 VPS 本地时间）
+    fun_first_seconds = _seconds_until_next_monday_9am()
+    application.job_queue.run_repeating(
+        _weekly_fun_finds_job,
+        interval=604800,
+        first=fun_first_seconds,
+        name="weekly_fun_finds",
+    )
+    logger.info("每周趣文任务已注册，下次触发在周一 9:00（%.0f 秒后）", fun_first_seconds)
 
     # 注册命令菜单（输入 / 时显示）
     await application.bot.set_my_commands([
@@ -134,7 +153,11 @@ async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             len(result.get("candidates", [])),
         )
         # 识别新候选，无新内容时静默
-        candidates = result.get("candidates", [])
+        # 过滤掉 xai_fun 趣文（由每周独立任务展示，不混入常规候选）
+        candidates = [
+            c for c in result.get("candidates", [])
+            if c.get("source_type") != "xai_fun"
+        ]
         new_ids = {
             c["external_id"] for c in candidates
             if c["external_id"] not in pipeline._presented_candidate_ids
@@ -171,6 +194,44 @@ async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             except Exception as send_exc:
                 logger.error("发送错误通知失败: %s", send_exc)
+
+
+async def _weekly_fun_finds_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """每周定时：用 xAI 发现有趣推文，单独推送到 Telegram。"""
+    config = context.application.bot_data.get(_BOT_DATA_CONFIG_KEY)
+    pipeline = context.application.bot_data.get(_BOT_DATA_PIPELINE_KEY)
+    if not isinstance(config, AppConfig) or not isinstance(pipeline, Pipeline):
+        logger.error("每周趣文任务：Pipeline 未初始化")
+        return
+    try:
+        results = await pipeline.discover_fun_tweets(n=3)
+        if not results:
+            logger.info("每周趣文任务：xAI 未返回内容，静默")
+            return
+
+        # 更新 _last_candidates，让用户可以直接回复「发1」审核
+        pipeline._last_candidates = results
+
+        lines = ["🎭 本周趣文发现（xAI 精选）\n"]
+        for i, r in enumerate(results, 1):
+            lines.append(f"[{i}] @{r['handle']}")
+            lines.append(r["content"][:200])
+            if r.get("fun_point"):
+                lines.append(f"💡 {r['fun_point']}")
+            lines.append(r["url"])
+            lines.append("")
+        lines.append("回复「发1」可审核翻译并发到小红书")
+
+        if config.telegram:
+            from telegram import Bot
+            bot = Bot(token=config.telegram.bot_token)
+            await bot.send_message(
+                chat_id=config.telegram.chat_id,
+                text="\n".join(lines),
+            )
+    except Exception:
+        tb = traceback.format_exc()
+        logger.error("每周趣文任务失败:\n%s", tb)
 
 
 async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -404,8 +465,13 @@ async def _build_nl_context(pipeline: Pipeline) -> str:
         if candidates:
             cand_lines = []
             for i, c in enumerate(candidates, 1):
-                preview = c["content"][:60].replace("\n", " ")
-                cand_lines.append(f"[{i}] @{c['handle']}({c['filter_score']}分): {preview}")
+                title = c.get("preview_title", "")
+                source_tag = "[趣文] " if c.get("source_type") == "xai_fun" else ""
+                if title:
+                    cand_lines.append(f"[{i}] {source_tag}@{c['handle']}({c['filter_score']}分)「{title}」")
+                else:
+                    preview = c["content"][:60].replace("\n", " ")
+                    cand_lines.append(f"[{i}] {source_tag}@{c['handle']}({c['filter_score']}分): {preview}")
             candidate_str = "\n".join(cand_lines)
         else:
             candidate_str = "无"

@@ -75,6 +75,40 @@ class XAIClient:
         text = response.choices[0].message.content or ""
         return self._parse_viral_tweets(text, keyword)
 
+    async def search_fun_finds(self, n: int = 3) -> list[RawTweet]:
+        """开放式搜索：找过去 7 天内最有趣、好笑、有共鸣的推文。不限主题。
+
+        返回 RawTweet 列表，source_type="xai_fun"，source_value 存有趣点说明。
+        """
+        prompt = (
+            f"Search X (Twitter) for the {n} most funny, surprising, or delightfully unexpected English-language tweets "
+            f"from the past 7 days. Focus on tweets that would make Chinese tech/internet users laugh or feel a sense of "
+            f"shared recognition.\n\n"
+            f"Preferred topics (not limited to):\n"
+            f"- AI product easter eggs or surprising behaviors\n"
+            f"- Unexpected or funny AI experiments\n"
+            f"- Ironic tech culture observations\n"
+            f"- Anything that makes you go 'wow, I didn't know that' or 'haha, so true'\n\n"
+            f"Requirements:\n"
+            f"- Must be real tweets with verifiable tweet URLs (https://x.com/handle/status/<tweet_id>)\n"
+            f"- English-language tweets preferred\n"
+            f"- Avoid political or controversial content\n\n"
+            f"For each tweet, output in this exact format (blank line between entries):\n"
+            f"作者：@handle\n"
+            f"内容：（推文完整原文）\n"
+            f"链接：https://x.com/handle/status/<tweet_id>\n"
+            f"有趣点：（一句话中文说明为什么有趣）\n"
+        )
+
+        response = await self._client.chat.completions.create(
+            model=self._config.model,
+            messages=[{"role": "user", "content": prompt}],
+            extra_body={"plugins": [{"id": "web"}]},
+        )
+
+        text = response.choices[0].message.content or ""
+        return self._parse_fun_tweets(text)
+
     # ── 解析工具 ──
 
     def _extract_citations(self, response) -> tuple[str, ...]:
@@ -162,5 +196,42 @@ class XAIClient:
 
         if not tweets:
             logger.warning("xAI viral_fallback 解析失败，文本长度=%d", len(text))
+
+        return tweets
+
+    def _parse_fun_tweets(self, text: str) -> list[RawTweet]:
+        """从模型输出文本解析出趣文推文列表。source_value 存「有趣点」说明。"""
+        tweets: list[RawTweet] = []
+        blocks = re.split(r"\n\s*\n", text.strip())
+
+        for block in blocks:
+            handle_m = re.search(r"作者[：:]\s*@?(\w+)", block)
+            content_m = re.search(r"内容[：:]\s*(.+?)(?=链接[：:]|有趣点[：:]|$)", block, re.DOTALL)
+            url_m = re.search(r"链接[：:]\s*(https://x\.com/\S+)", block)
+            fun_m = re.search(r"有趣点[：:]\s*(.+)", block)
+
+            if not (handle_m and content_m):
+                continue
+
+            handle = handle_m.group(1).strip()
+            content = content_m.group(1).strip()
+            url = url_m.group(1).strip() if url_m else f"https://x.com/{handle}"
+            fun_point = fun_m.group(1).strip() if fun_m else ""
+
+            id_m = re.search(r"/status/(\d+)", url)
+            external_id = id_m.group(1) if id_m else f"xai_fun_{len(tweets)}"
+
+            tweets.append(RawTweet(
+                external_id=external_id,
+                handle=handle,
+                content=content,
+                url=url,
+                published_at=datetime.now(tz=timezone.utc),
+                source_type="xai_fun",
+                source_value=fun_point,
+            ))
+
+        if not tweets:
+            logger.warning("xAI fun_finds 解析失败，文本长度=%d", len(text))
 
         return tweets

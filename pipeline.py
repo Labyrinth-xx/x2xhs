@@ -595,6 +595,48 @@ class Pipeline:
             "message": message,
         }
 
+    async def discover_fun_tweets(self, n: int = 3) -> list[dict]:
+        """调用 xAI 发现本周有趣推文，保存到 DB 并标记高分（跳过正常评分）。"""
+        await self.setup()
+
+        if not self._xai:
+            return []
+
+        try:
+            raw_tweets = await self._xai.search_fun_finds(n=n)
+        except Exception as exc:
+            logger.error("xAI search_fun_finds 失败: %s", exc)
+            return []
+
+        if not raw_tweets:
+            return []
+
+        await self._repo.save_tweets(raw_tweets)
+        for tweet in raw_tweets:
+            await self._repo.save_score(
+                tweet.external_id,
+                score=9.0,
+                reason="xAI fun find",
+                detail={"preview_title": tweet.source_value or "趣文发现"},
+            )
+
+        return [
+            {
+                "external_id": t.external_id,
+                "handle": t.handle,
+                "content": t.content,
+                "url": t.url,
+                "fun_point": t.source_value,
+                "filter_score": 9.0,
+                "filter_reason": "xAI fun find",
+                "source_type": "xai_fun",
+                "image_urls": "",
+                "preview_title": t.source_value or "趣文发现",
+                "published_at": t.published_at.isoformat(),
+            }
+            for t in raw_tweets
+        ]
+
     def _cleanup_images(self, images: list[str] | object) -> None:
         for image_str in images if isinstance(images, list) else []:
             path = Path(image_str)

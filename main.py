@@ -44,6 +44,9 @@ def build_parser() -> argparse.ArgumentParser:
     digest_parser = subparsers.add_parser("digest", help="话题综述：用 xAI 生成关键词领域的中文综述文章")
     digest_parser.add_argument("--keyword", required=True, help="搜索关键词")
 
+    discover_parser = subparsers.add_parser("discover-fun", help="每周趣文：用 xAI 开放式搜索有趣推文并保存到候选队列")
+    discover_parser.add_argument("--n", type=int, default=3, help="搜索条数（默认 3）")
+
     return parser
 
 
@@ -129,6 +132,19 @@ async def run_command(args: argparse.Namespace) -> int:
             )
         else:
             console.print(f"[red]话题综述生成失败[/red] {result['reason']}")
+        return 0
+
+    if args.command == "discover-fun":
+        results = await pipeline.discover_fun_tweets(n=args.n)
+        if not results:
+            console.print("[yellow]未发现有趣推文（xAI 未返回内容或未配置）[/yellow]")
+        else:
+            console.print(f"[green]发现 {len(results)} 条趣文，已保存到候选队列[/green]")
+            for r in results:
+                console.print(f"\n@{r['handle']}: {r['content'][:100]}...")
+                if r.get("fun_point"):
+                    console.print(f"  💡 {r['fun_point']}")
+                console.print(f"  {r['url']}")
         return 0
 
     raise ValueError(f"未知命令: {args.command}")
