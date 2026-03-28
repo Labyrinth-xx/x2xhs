@@ -136,11 +136,12 @@ async def run_command(args: argparse.Namespace) -> int:
 
     if args.command == "discover-fun":
         results = await pipeline.discover_fun_tweets(n=args.n)
-        if not results:
+        items = results.get("items", [])
+        if not items:
             console.print("[yellow]未发现有趣推文（xAI 未返回内容或未配置）[/yellow]")
         else:
-            console.print(f"[green]发现 {len(results)} 条趣文，已保存到候选队列[/green]")
-            for r in results:
+            console.print(f"[green]发现 {len(items)} 条趣文，{results.get('added_count', 0)} 条加入候选池[/green]")
+            for r in items:
                 console.print(f"\n@{r['handle']}: {r['content'][:100]}...")
                 if r.get("fun_point"):
                     console.print(f"  💡 {r['fun_point']}")

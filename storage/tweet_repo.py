@@ -255,8 +255,10 @@ class TweetRepository:
         reason: str,
         detail: dict | None = None,
     ) -> None:
-        preview_title = detail.pop("preview_title", None) if detail else None
-        detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
+        preview_title = detail.get("preview_title") if detail else None
+        # 序列化时排除 preview_title（它存独立列）
+        detail_for_json = {k: v for k, v in detail.items() if k != "preview_title"} if detail else None
+        detail_json = json.dumps(detail_for_json, ensure_ascii=False) if detail_for_json else None
         async with self._database.connect() as conn:
             await conn.execute(
                 "UPDATE tweets SET filter_score = ?, filter_reason = ?, filter_scores_detail = ?, preview_title = ? WHERE external_id = ?",
@@ -439,6 +441,122 @@ class TweetRepository:
             log_row = await cursor.fetchone()
             counts["scrape_log"] = int(log_row["total"])
         return dict(counts)
+
+    # ── 候选池 ──
+
+    async def add_to_pool(
+        self,
+        tweet_external_id: str,
+        source_label: str,
+        source_detail: str,
+        score: float,
+        reason: str = "",
+        preview_text: str = "",
+    ) -> bool:
+        """将推文加入候选池。返回 True 表示新增，False 表示已存在。"""
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                """
+                INSERT OR IGNORE INTO candidate_pool (
+                    tweet_external_id, source_label, source_detail,
+                    filter_score, filter_reason, preview_text,
+                    expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+3 days'))
+                """,
+                (tweet_external_id, source_label, source_detail, score, reason, preview_text),
+            )
+        return cursor.rowcount > 0
+
+    async def list_pool_candidates(self) -> list[dict]:
+        """查询所有活跃且未过期的候选，按分数降序。"""
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT cp.tweet_external_id, cp.source_label, cp.source_detail,
+                       cp.filter_score, cp.filter_reason, cp.preview_text,
+                       cp.entered_at, cp.expires_at,
+                       t.handle, t.content, t.url, t.published_at,
+                       t.source_type, t.image_urls, t.preview_title
+                FROM candidate_pool cp
+                JOIN tweets t ON t.external_id = cp.tweet_external_id
+                WHERE cp.pool_status = 'active'
+                  AND cp.expires_at > datetime('now')
+                ORDER BY cp.filter_score DESC, cp.entered_at DESC
+                """
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_pool_candidate_by_id(self, tweet_external_id: str) -> dict | None:
+        """按 tweet_external_id 返回活跃候选，不存在返回 None。"""
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT cp.tweet_external_id, cp.source_label, cp.source_detail,
+                       cp.filter_score, cp.filter_reason, cp.preview_text,
+                       cp.entered_at, cp.expires_at,
+                       t.handle, t.content, t.url, t.published_at,
+                       t.source_type, t.image_urls, t.preview_title
+                FROM candidate_pool cp
+                JOIN tweets t ON t.external_id = cp.tweet_external_id
+                WHERE cp.pool_status = 'active'
+                  AND cp.expires_at > datetime('now')
+                  AND cp.tweet_external_id = ?
+                """,
+                (tweet_external_id,),
+            )
+            row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_pool_candidate_by_index(self, index: int) -> dict | None:
+        """返回池中第 N 条活跃候选（1-based），不存在返回 None。"""
+        candidates = await self.list_pool_candidates()
+        if index < 1 or index > len(candidates):
+            return None
+        return candidates[index - 1]
+
+    async def dismiss_candidate(self, tweet_external_id: str) -> bool:
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                "UPDATE candidate_pool SET pool_status = 'dismissed' WHERE tweet_external_id = ? AND pool_status = 'active'",
+                (tweet_external_id,),
+            )
+            changed = cursor.rowcount
+        return changed > 0
+
+    async def dismiss_all_candidates(self) -> int:
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                "UPDATE candidate_pool SET pool_status = 'dismissed' WHERE pool_status = 'active'"
+            )
+            changed = cursor.rowcount
+        return changed
+
+    async def mark_candidate_published(self, tweet_external_id: str) -> bool:
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                "UPDATE candidate_pool SET pool_status = 'published' WHERE tweet_external_id = ? AND pool_status = 'active'",
+                (tweet_external_id,),
+            )
+            changed = cursor.rowcount
+        return changed > 0
+
+    async def expire_pool_candidates(self) -> int:
+        """将过期的活跃候选标记为 dismissed。"""
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                "UPDATE candidate_pool SET pool_status = 'dismissed' WHERE pool_status = 'active' AND expires_at < datetime('now')"
+            )
+            changed = cursor.rowcount
+        return changed
+
+    async def count_pool_active(self) -> int:
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) AS total FROM candidate_pool WHERE pool_status = 'active' AND expires_at > datetime('now')"
+            )
+            row = await cursor.fetchone()
+        return int(row["total"])
 
     def _row_to_tweet(self, row: object) -> RawTweet:
         return RawTweet(

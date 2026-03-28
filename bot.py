@@ -32,14 +32,6 @@ def _seconds_until_next_hour() -> float:
     return (next_hour - now).total_seconds()
 
 
-def _seconds_until_next_monday_9am() -> float:
-    now = datetime.datetime.now()
-    days_ahead = (7 - now.weekday()) % 7 or 7  # 0=Monday，今天若是周一则等下周
-    target = (now + datetime.timedelta(days=days_ahead)).replace(
-        hour=9, minute=0, second=0, microsecond=0
-    )
-    return (target - now).total_seconds()
-
 
 def _parse_limit(args: list[str]) -> int | None:
     if not args:
@@ -63,8 +55,13 @@ def _format_keywords(keywords: list[str]) -> str:
 
 
 def _format_status(counts: dict[str, int]) -> str:
-    keys = ["tweets", "sent", "filtered", "scrape_log"]
-    lines = [f"{key}: {counts.get(key, 0)}" for key in keys]
+    pool_active = counts.get("pool_active", 0)
+    lines = [
+        f"候选池: {pool_active} 条待审",
+        f"tweets: {counts.get('tweets', 0)}",
+        f"sent: {counts.get('sent', 0)}",
+        f"filtered: {counts.get('filtered', 0)}",
+    ]
     return "当前状态：\n" + "\n".join(lines)
 
 
@@ -75,25 +72,15 @@ async def _post_init(application: Application) -> None:
     application.bot_data[_BOT_DATA_CONFIG_KEY] = config
     application.bot_data[_BOT_DATA_PIPELINE_KEY] = pipeline
 
-    # 注册定时抓取+评分任务，对齐整点
+    # 注册统一定时任务：每小时抓取账户 + 按需执行周任务
     first_seconds = _seconds_until_next_hour()
     application.job_queue.run_repeating(
-        _auto_score_job,
+        _unified_pool_job,
         interval=3600,
         first=first_seconds,
         name="auto_score",
     )
-    logger.info("定时评分任务已注册，下次触发在整点（%.0f 秒后）", first_seconds)
-
-    # 注册每周趣文发现任务（每周一 9:00 VPS 本地时间）
-    fun_first_seconds = _seconds_until_next_monday_9am()
-    application.job_queue.run_repeating(
-        _weekly_fun_finds_job,
-        interval=604800,
-        first=fun_first_seconds,
-        name="weekly_fun_finds",
-    )
-    logger.info("每周趣文任务已注册，下次触发在周一 9:00（%.0f 秒后）", fun_first_seconds)
+    logger.info("统一候选池任务已注册，下次触发在整点（%.0f 秒后）", first_seconds)
 
     # 注册命令菜单（输入 / 时显示）
     await application.bot.set_my_commands([
@@ -106,9 +93,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("remove", "删除监控账号"),
         BotCommand("keywords", "监控关键词列表"),
         BotCommand("status", "查看系统状态"),
-        BotCommand("viral", "关键词爆文搜索"),
         BotCommand("digest", "话题综述（xAI）"),
-        BotCommand("fun", "立即发现本周趣文"),
         BotCommand("pause", "暂停自动推送"),
         BotCommand("resume", "恢复自动推送"),
         BotCommand("off", "🛑 紧急停止 bot"),
@@ -134,53 +119,83 @@ async def _ensure_allowed(update: Update, config: AppConfig) -> bool:
     return False
 
 
-async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """定时任务：抓取 → 评分 → 推送候选到 Telegram。"""
+def _should_run_weekly(pipeline: Pipeline, attr: str, now: datetime.datetime) -> bool:
+    """检查是否应执行周任务（上次运行超过 6 天）。"""
+    last_run = getattr(pipeline, attr, None)
+    if last_run is None:
+        return True
+    return (now - datetime.datetime.fromtimestamp(last_run)).days >= 6
+
+
+async def _unified_pool_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """统一定时任务：每小时抓取账户 + 按需执行周任务（关键词/趣文）→ 入池 → 通知。"""
     config = context.application.bot_data.get(_BOT_DATA_CONFIG_KEY)
     pipeline = context.application.bot_data.get(_BOT_DATA_PIPELINE_KEY)
     if not isinstance(config, AppConfig) or not isinstance(pipeline, Pipeline):
         logger.error("定时任务：Pipeline 未初始化")
         return
     try:
+        now = datetime.datetime.now()
+
+        # 1. 每小时：账户抓取 + 评分 + 入池
         accounts = await pipeline.list_accounts()
-        keywords = await pipeline.list_keywords()
-        if not accounts and not keywords:
-            logger.info("定时任务：无监控账号和关键词，跳过")
-            return
-        result = await pipeline.score_and_present(scrape_first=True)
-        logger.info(
-            "定时评分完成: fetched=%d inserted=%d scored=%d candidates=%d",
-            result["fetched"], result["inserted"], result["scored"],
-            len(result.get("candidates", [])),
-        )
-        # 识别新候选，无新内容时静默
-        # 过滤掉 xai_fun 趣文（由每周独立任务展示，不混入常规候选）
-        candidates = [
-            c for c in result.get("candidates", [])
-            if c.get("source_type") != "xai_fun"
-        ]
-        new_ids = {
-            c["external_id"] for c in candidates
-            if c["external_id"] not in pipeline._presented_candidate_ids
-        }
-        if not new_ids:
-            logger.info("定时任务：无新候选，静默")
-            return
+        if accounts:
+            result = await pipeline.score_and_present(scrape_first=True)
+            added_count = result.get("added_count", 0)
+            logger.info(
+                "定时评分完成: fetched=%d inserted=%d scored=%d added=%d",
+                result["fetched"], result["inserted"], result["scored"], added_count,
+            )
+        else:
+            added_count = 0
+            logger.info("定时任务：无监控账号，跳过账户抓取")
 
-        # 新推文置顶，其余按分排序；缓存保持与展示一致
-        sorted_candidates = pipeline._sort_candidates_new_first(candidates, new_ids)
-        pipeline._last_candidates = sorted_candidates
+        # 2. 每周：关键词搜索
+        if _should_run_weekly(pipeline, "_last_keyword_run", now):
+            keywords = await pipeline.list_keywords()
+            kw_any_succeeded = False
+            for kw in keywords:
+                try:
+                    kw_result = await pipeline.keyword_search_to_pool(kw)
+                    if kw_result.get("success"):
+                        added_count += kw_result.get("added", 0)
+                        logger.info("关键词搜索完成: %s → @%s", kw, kw_result.get("handle"))
+                        kw_any_succeeded = True
+                except Exception as exc:
+                    logger.warning("关键词搜索失败 [%s]: %s", kw, exc)
+            if kw_any_succeeded:
+                pipeline._last_keyword_run = now.timestamp()
 
-        message = pipeline._format_candidates(sorted_candidates, new_ids=new_ids)
-        if config.telegram:
+        # 3. 每周：趣文发现
+        if _should_run_weekly(pipeline, "_last_fun_run", now):
+            try:
+                fun_results = await pipeline.discover_fun_tweets(n=3)
+                fun_items = fun_results.get("items", [])
+                fun_added = fun_results.get("added_count", 0)
+                if fun_added:
+                    added_count += fun_added
+                    logger.info("趣文发现完成: %d 条入池", fun_added)
+                if fun_items:
+                    pipeline._last_fun_run = now.timestamp()
+            except Exception as exc:
+                logger.warning("趣文发现失败: %s", exc)
+
+        # 4. 有新增候选时推送通知
+        if added_count > 0 and config.telegram:
+            pool = await pipeline.view_candidates()
+            pool_total = pool.get("count", 0)
             from telegram import Bot
             bot = Bot(token=config.telegram.bot_token)
+            notify_text = f"🔔 候选池已更新（+{added_count} 条），当前共 {pool_total} 条"
+            if pool["message"]:
+                notify_text += f"\n\n{pool['message']}"
             await bot.send_message(
                 chat_id=config.telegram.chat_id,
-                text=message,
+                text=notify_text,
             )
-        for c in sorted_candidates:
-            pipeline._presented_candidate_ids.add(c["external_id"])
+        elif added_count == 0:
+            logger.info("定时任务：无新候选，静默")
+
     except Exception:
         tb = traceback.format_exc()
         logger.error("定时任务失败:\n%s", tb)
@@ -195,44 +210,6 @@ async def _auto_score_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             except Exception as send_exc:
                 logger.error("发送错误通知失败: %s", send_exc)
-
-
-async def _weekly_fun_finds_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """每周定时：用 xAI 发现有趣推文，单独推送到 Telegram。"""
-    config = context.application.bot_data.get(_BOT_DATA_CONFIG_KEY)
-    pipeline = context.application.bot_data.get(_BOT_DATA_PIPELINE_KEY)
-    if not isinstance(config, AppConfig) or not isinstance(pipeline, Pipeline):
-        logger.error("每周趣文任务：Pipeline 未初始化")
-        return
-    try:
-        results = await pipeline.discover_fun_tweets(n=3)
-        if not results:
-            logger.info("每周趣文任务：xAI 未返回内容，静默")
-            return
-
-        # 更新 _last_candidates，让用户可以直接回复「发1」审核
-        pipeline._last_candidates = results
-
-        lines = ["🎭 本周趣文发现（xAI 精选）\n"]
-        for i, r in enumerate(results, 1):
-            lines.append(f"[{i}] @{r['handle']}")
-            lines.append(r["content"][:200])
-            if r.get("fun_point"):
-                lines.append(f"💡 {r['fun_point']}")
-            lines.append(r["url"])
-            lines.append("")
-        lines.append("回复「发1」可审核翻译并发到小红书")
-
-        if config.telegram:
-            from telegram import Bot
-            bot = Bot(token=config.telegram.bot_token)
-            await bot.send_message(
-                chat_id=config.telegram.chat_id,
-                text="\n".join(lines),
-            )
-    except Exception:
-        tb = traceback.format_exc()
-        logger.error("每周趣文任务失败:\n%s", tb)
 
 
 async def off_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -268,33 +245,13 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     first_seconds = _seconds_until_next_hour()
     context.job_queue.run_repeating(
-        _auto_score_job,
+        _unified_pool_job,
         interval=3600,
         first=first_seconds,
         name="auto_score",
     )
     logger.info("定时推送已恢复")
     await update.effective_message.reply_text(f"▶️ 定时推送已恢复，将在下一个整点（{int(first_seconds // 60)} 分钟后）执行。")
-
-
-async def viral_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """关键词爆文搜索：/viral <关键词>"""
-    config, pipeline = _get_pipeline(context)
-    if not await _ensure_allowed(update, config):
-        return
-    if not context.args:
-        await update.effective_message.reply_text("用法: /viral <关键词>\n例如: /viral AI agents")
-        return
-    keyword = " ".join(context.args)
-    await update.effective_message.reply_text(f"⏳ 正在搜索关键词「{keyword}」的爆文...")
-    result = await pipeline.keyword_viral(keyword)
-    if result["success"]:
-        await update.effective_message.reply_text(
-            f"✅ 已发送 @{result['handle']} 的推文（来源: {result.get('source', '?')}）\n"
-            f"标题：{result['title']}"
-        )
-    else:
-        await update.effective_message.reply_text(f"❌ 搜索失败：{result['reason']}")
 
 
 async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -314,64 +271,30 @@ async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text(f"❌ 生成失败：{result['reason']}")
 
 
-async def fun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """立即触发趣文发现：/fun [n]"""
-    config, pipeline = _get_pipeline(context)
-    if not await _ensure_allowed(update, config):
-        return
-    n = 1
-    if context.args:
-        try:
-            n = int(context.args[0])
-        except ValueError:
-            pass
-    await update.effective_message.reply_text("⏳ 正在搜索本周趣文，约需 15 秒...")
-    results = await pipeline.discover_fun_tweets(n=n)
-    if not results:
-        await update.effective_message.reply_text("❌ 未找到趣文（xAI 未返回内容或未配置）")
-        return
-
-    pipeline._last_candidates = results
-
-    lines = ["🎭 本周趣文发现（xAI 精选）\n"]
-    for i, r in enumerate(results, 1):
-        lines.append(f"[{i}] @{r['handle']}")
-        lines.append(r["content"][:200])
-        if r.get("fun_point"):
-            lines.append(f"💡 {r['fun_point']}")
-        lines.append(r["url"])
-        lines.append("")
-    lines.append("回复「发1」可审核翻译并发到小红书")
-    await update.effective_message.reply_text("\n".join(lines))
-
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config, _ = _get_pipeline(context)
     if not await _ensure_allowed(update, config):
         return
     await update.effective_message.reply_text(
         "\n".join([
-            "x2xhs bot 已启动，每小时自动抓取+评分并推送候选。",
+            "x2xhs bot 已启动",
             "",
-            "📋 候选确认：回复「发1」确认发布",
-            "/scores 查看最近评分",
-            "/threshold [n] 查看/调整评分阈值",
-            "/feedback <内容> 给评分器反馈偏好",
+            "三条线自动运作，内容统一进入候选池：",
+            "  📌 账户监控 — 每小时自动抓取评分",
+            "  🔍 关键词搜索 — 每周自动精选",
+            "  🎭 趣文发现 — 每周自动发现",
             "",
-            "/viral <关键词> 关键词爆文搜索",
-            "/digest <关键词> 话题综述（需 XAI_API_KEY）",
-            "/fun [n] 立即发现本周趣文（默认 1 条）",
+            "日常用自然语言操作即可：",
+            "「看看有什么」「发第3条」「跳过」「都不要」",
+            "「搜一下 AI agents 的爆文」「找个有趣的」",
+            "「严格一点」「技术类的更好」",
             "",
-            "/accounts 查看监控账号",
-            "/add <handle> 添加账号",
-            "/remove <handle> 删除账号",
-            "/keywords 查看监控关键词",
-            "/status 查看状态",
-            "/pause 暂停自动推送",
-            "/resume 恢复自动推送",
-            "",
-            "或直接用自然语言说：",
-            "「发1」「跳过」「严格一点」「技术类的更好」",
+            "命令参考：",
+            "/scores 最近评分  /threshold 阈值  /feedback 反馈",
+            "/accounts 账号  /add /remove 增删账号",
+            "/keywords 关键词  /status 状态",
+            "/digest <关键词> 话题综述",
+            "/pause 暂停  /resume 恢复",
         ])
     )
 
@@ -494,25 +417,26 @@ async def _build_nl_context(pipeline: Pipeline) -> str:
         counts = await pipeline.status()
         account_str = ", ".join(f"@{a}" for a in accounts) if accounts else "无"
         threshold = pipeline.threshold
-        candidates = pipeline._last_candidates
+        pool = await pipeline.view_candidates()
+        candidates = pool.get("candidates", [])
         if candidates:
             cand_lines = []
             for i, c in enumerate(candidates, 1):
+                label = c.get("source_label", "账户")
                 title = c.get("preview_title", "")
-                source_tag = "[趣文] " if c.get("source_type") == "xai_fun" else ""
                 if title:
-                    cand_lines.append(f"[{i}] {source_tag}@{c['handle']}({c['filter_score']}分)「{title}」")
+                    cand_lines.append(f"[{i}] [{label}] @{c['handle']}({c['filter_score']}分)「{title}」")
                 else:
-                    preview = c["content"][:60].replace("\n", " ")
-                    cand_lines.append(f"[{i}] {source_tag}@{c['handle']}({c['filter_score']}分): {preview}")
+                    preview = (c.get("preview_text") or c.get("content", ""))[:60].replace("\n", " ")
+                    cand_lines.append(f"[{i}] [{label}] @{c['handle']}({c['filter_score']}分): {preview}")
             candidate_str = "\n".join(cand_lines)
         else:
             candidate_str = "无"
         return (
             f"监控账号: {account_str}\n"
+            f"候选池={pool.get('count', 0)}条 "
             f"tweets={counts.get('tweets', 0)} "
-            f"sent={counts.get('sent', 0)} "
-            f"filtered={counts.get('filtered', 0)}\n"
+            f"sent={counts.get('sent', 0)}\n"
             f"评分阈值={threshold}\n"
             f"当前候选:\n{candidate_str}"
         )
@@ -575,76 +499,28 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
             keywords = await pipeline.list_keywords()
             await msg.reply_text(_format_keywords(keywords))
 
-        elif action == "score_and_present":
-            accounts = params.get("accounts") or None
+        elif action == "score_and_present" or action == "view_candidates":
             scrape_first = bool(params.get("scrape_first", True))
-            await msg.reply_text("⏳ 正在抓取并评分，稍等...")
-            result = await pipeline.score_and_present(
-                scrape_first=scrape_first,
-                accounts=accounts,
-            )
-            candidates = result.get("candidates", [])
-            new_ids = {
-                c["external_id"] for c in candidates
-                if c["external_id"] not in pipeline._presented_candidate_ids
-            }
-            sorted_candidates = pipeline._sort_candidates_new_first(candidates, new_ids)
-            pipeline._last_candidates = sorted_candidates
-            for c in sorted_candidates:
-                pipeline._presented_candidate_ids.add(c["external_id"])
-            if sorted_candidates:
-                message = pipeline._format_candidates(
-                    sorted_candidates, new_ids=new_ids or None,
+            if scrape_first and action == "score_and_present":
+                accounts = params.get("accounts") or None
+                await msg.reply_text("⏳ 正在抓取并评分，稍等...")
+                result = await pipeline.score_and_present(
+                    scrape_first=True,
+                    accounts=accounts,
                 )
-                await msg.reply_text(message)
+            pool = await pipeline.view_candidates()
+            if pool["message"]:
+                await msg.reply_text(pool["message"])
             else:
-                await msg.reply_text(
-                    f"暂无高分候选（已评分 {result['scored']} 条，新增 {result['inserted']} 条）"
-                )
+                await msg.reply_text("候选池为空，暂无高分候选")
 
         elif action == "deliver":
-            accounts = params.get("accounts") or None
-            scrape_first = bool(params.get("scrape_first", True))
-            temp = bool(params.get("temp", False))
-            limit = params.get("limit")
-            # 用户未指定数量时默认最多 2 条，防止刷屏
-            if limit is None:
-                limit = 2
-
-            if not accounts:
-                monitored_accounts = await pipeline.list_accounts()
-                monitored_keywords = await pipeline.list_keywords()
-                if not monitored_accounts and not monitored_keywords:
-                    await msg.reply_text("⚠️ 没有监控账号或关键词，请先添加。")
-                    return
-            elif temp:
-                logger.info("临时发送账号: %s", accounts)
-
-            result = await pipeline.deliver(
-                accounts=accounts,
-                limit=limit,
-                scrape_first=scrape_first,
-                force=False,
-            )
-            sent = result["sent"]
-            inserted = result["inserted"]
-            errors = result.get("errors", [])
-
-            if sent > 0:
-                reply = f"✅ 已发送 {sent} 条（本次新增 {inserted} 条）"
-            elif inserted > 0:
-                reply = f"抓到 {inserted} 条新增内容，但这次没有成功发送"
+            # deliver 已改为展示候选池，引导用户用 approve 发布
+            pool = await pipeline.view_candidates()
+            if pool["message"]:
+                await msg.reply_text(f"{pool['message']}\n\n回复序号即可发布，如「发1」")
             else:
-                reply = f"没有可发的内容（新增 {inserted} 条）"
-
-            if errors:
-                error_text = "\n".join(str(err) for err in errors[:3])
-                if len(errors) > 3:
-                    error_text += f"\n…共 {len(errors)} 条失败"
-                reply += f"\n\n⚠️ 失败详情：\n{error_text}"
-
-            await msg.reply_text(reply)
-            return
+                await msg.reply_text("候选池为空，请等待定时抓取或手动搜索")
 
         elif action == "status":
             counts = await pipeline.status()
@@ -672,25 +548,26 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
                 else:
                     first_seconds = _seconds_until_next_hour()
                     context.job_queue.run_repeating(
-                        _auto_score_job,
+                        _unified_pool_job,
                         interval=3600,
                         first=first_seconds,
                         name="auto_score",
                     )
                     await msg.reply_text(f"▶️ 定时推送已恢复，将在下一个整点（{int(first_seconds // 60)} 分钟后）执行。")
 
-        elif action == "viral":
+        elif action == "viral" or action == "keyword_search":
             keyword = str(params.get("keyword", "")).strip()
             if not keyword:
                 await msg.reply_text("请告诉我要搜索哪个关键词，比如「AI agents 爆文」")
                 return
-            await msg.reply_text(f"⏳ 正在搜索「{keyword}」的爆文...")
-            result = await pipeline.keyword_viral(keyword)
+            await msg.reply_text(f"⏳ 正在搜索「{keyword}」...")
+            result = await pipeline.keyword_search_to_pool(keyword)
             if result["success"]:
-                await msg.reply_text(
-                    f"✅ 已发送 @{result['handle']} 的推文（来源: {result.get('source', '?')}）\n"
-                    f"标题：{result['title']}"
-                )
+                pool = await pipeline.view_candidates()
+                reply = f"✅ @{result['handle']} 已加入候选池"
+                if pool["message"]:
+                    reply += f"\n\n{pool['message']}"
+                await msg.reply_text(reply)
             else:
                 await msg.reply_text(f"❌ 搜索失败：{result['reason']}")
 
@@ -706,24 +583,19 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
             else:
                 await msg.reply_text(f"❌ 生成失败：{result['reason']}")
 
-        elif action == "discover_fun":
-            n = int(params.get("n", 1))
+        elif action == "discover_fun" or action == "search_fun":
+            n = min(int(params.get("n", 1)), 3)
             await msg.reply_text("⏳ 正在搜索本周趣文，约需 15 秒...")
             results = await pipeline.discover_fun_tweets(n=n)
-            if not results:
+            fun_added = results.get("added_count", 0)
+            if not results.get("items"):
                 await msg.reply_text("❌ 未找到趣文（xAI 未返回内容或未配置）")
                 return
-            pipeline._last_candidates = results
-            lines = ["🎭 本周趣文发现（xAI 精选）\n"]
-            for i, r in enumerate(results, 1):
-                lines.append(f"[{i}] @{r['handle']}")
-                lines.append(r["content"][:200])
-                if r.get("fun_point"):
-                    lines.append(f"💡 {r['fun_point']}")
-                lines.append(r["url"])
-                lines.append("")
-            lines.append("回复「发1」可审核翻译并发到小红书")
-            await msg.reply_text("\n".join(lines))
+            pool = await pipeline.view_candidates()
+            reply = f"✅ 找到 {len(results['items'])} 条趣文，{fun_added} 条加入候选池"
+            if pool["message"]:
+                reply += f"\n\n{pool['message']}"
+            await msg.reply_text(reply)
 
         elif action == "scrape":
             accounts = params.get("accounts") or None
@@ -735,29 +607,36 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
 
         elif action == "approve_candidate":
             index = int(params.get("index", 0))
-            if index < 1 or not pipeline._last_candidates or index > len(pipeline._last_candidates):
-                await msg.reply_text(f"没找到对应的候选（当前 {len(pipeline._last_candidates)} 条），能再描述一下吗？")
+            if index < 1:
+                await msg.reply_text("请指定候选序号，比如「发1」")
                 return
 
             # 二次确认：展示匹配到的推文，等用户确认
             if not params.get("_confirmed") and context is not None:
-                c = pipeline._last_candidates[index - 1]
-                preview = c["content"][:200].replace("\n", " ")
+                pool = await pipeline.view_candidates()
+                candidates = pool.get("candidates", [])
+                if index > len(candidates):
+                    await msg.reply_text(f"没找到第 {index} 条候选（当前 {len(candidates)} 条），能再描述一下吗？")
+                    return
+                c = candidates[index - 1]
+                preview = (c.get("preview_text") or c.get("content", ""))[:200].replace("\n", " ")
+                label = c.get("source_label", "账户")
                 await msg.reply_text(
                     f"找到这条：\n"
-                    f"@{c['handle']} [{c['filter_score']}分]\n\n"
+                    f"[{label}] @{c['handle']} [{c['filter_score']}分]\n\n"
                     f"{preview}...\n\n"
                     f"是这条吗？"
                 )
                 context.user_data[_PENDING_INTENT_KEY] = Intent(
                     action="approve_candidate",
-                    params={**params, "_confirmed": True},
+                    params={**params, "_confirmed": True, "_tweet_id": c["tweet_external_id"]},
                 )
                 return
 
             await msg.reply_text(f"⏳ 正在处理...")
             try:
-                result = await pipeline.process_candidate(index)
+                tweet_id = params.get("_tweet_id")
+                result = await pipeline.process_candidate(index, tweet_external_id=tweet_id)
                 if result.get("success"):
                     await msg.reply_text(
                         f"✅ 已处理 @{result['handle']}: {result['title']}\n"
@@ -771,8 +650,19 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
                 await msg.reply_text(f"⚠️ 模型判断不适合写: {exc.reason}")
 
         elif action == "skip_candidates":
-            pipeline._last_candidates = []
-            await msg.reply_text("✅ 已跳过当前所有候选")
+            dismissed = await pipeline.skip_all_candidates()
+            await msg.reply_text(f"✅ 已跳过 {dismissed} 条候选")
+
+        elif action == "skip_candidate":
+            index = int(params.get("index", 0))
+            if index < 1:
+                await msg.reply_text("请指定要跳过的候选序号")
+                return
+            success = await pipeline.skip_candidate(index)
+            if success:
+                await msg.reply_text(f"✅ 已跳过第 {index} 条")
+            else:
+                await msg.reply_text(f"⚠️ 找不到第 {index} 条候选")
 
         elif action == "scorer_feedback":
             feedback_content = str(params.get("content", "")).strip()
@@ -872,7 +762,8 @@ async def handle_natural_language(update: Update, context: ContextTypes.DEFAULT_
             del context.user_data[_PENDING_INTENT_KEY]
             await update.effective_message.reply_text("已取消。")
             return
-        # 其他内容视为新指令，覆盖 pending
+        # 其他内容视为新指令，清除旧 pending
+        del context.user_data[_PENDING_INTENT_KEY]
 
     await update.effective_chat.send_action("typing")
 
@@ -925,9 +816,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("feedback", feedback_command))
     application.add_handler(CommandHandler("threshold", threshold_command))
     application.add_handler(CommandHandler("scores", scores_command))
-    application.add_handler(CommandHandler("viral", viral_command))
     application.add_handler(CommandHandler("digest", digest_command))
-    application.add_handler(CommandHandler("fun", fun_command))
     application.add_handler(CommandHandler("off", off_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_natural_language))
     application.add_error_handler(_handle_error)

@@ -66,6 +66,20 @@ CREATE TABLE IF NOT EXISTS scorer_feedback (
     content TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS candidate_pool (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tweet_external_id TEXT NOT NULL UNIQUE,
+    source_label TEXT NOT NULL,
+    source_detail TEXT NOT NULL,
+    filter_score REAL NOT NULL,
+    filter_reason TEXT,
+    preview_text TEXT,
+    pool_status TEXT NOT NULL DEFAULT 'active',
+    entered_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY(tweet_external_id) REFERENCES tweets(external_id)
+);
 """
 
 

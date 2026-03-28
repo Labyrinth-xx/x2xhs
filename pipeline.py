@@ -35,7 +35,6 @@ class Pipeline:
         self._scorer = TweetScorer(config.processor.openrouter_api_key, config.filter)
         self._formatter = ContentFormatter()
         self._threshold_override: float | None = None
-        self._last_candidates: list[dict] = []
         self._overlayer = TweetImageOverlayer()
         self._screenshotter = TweetScreenshotter(
             auth_token=config.publisher.twitter_auth_token,
@@ -45,7 +44,9 @@ class Pipeline:
         self._telegram = TelegramNotifier(config.telegram) if config.telegram else None
         self._xai = XAIClient(config.xai, config.processor.openrouter_api_key) if config.xai else None
         self._viral_selector = ViralSelector(config.processor)
-        self._presented_candidate_ids: set[str] = set()
+        # 每周任务时间追踪（重启后首次会多跑一次，无害）
+        self._last_keyword_run: float | None = None
+        self._last_fun_run: float | None = None
 
     async def setup(self) -> Path:
         self._config.data_dir.mkdir(parents=True, exist_ok=True)
@@ -64,12 +65,6 @@ class Pipeline:
                 await self._repo.add_keyword(kw)
             logger.info("从 .env 导入初始关键词: %s", list(self._config.scraper.keywords))
         await self._twscrape.setup()
-        # 重启后预填已展示 ID，避免重复推送
-        if not self._presented_candidate_ids:
-            existing = await self._repo.list_scored_candidates(
-                min_score=0, limit=50,
-            )
-            self._presented_candidate_ids = {c["external_id"] for c in existing}
         return self._config.db_path
 
     async def scrape(
@@ -173,75 +168,72 @@ class Pipeline:
         if expired:
             logger.info("过期清理 %d 条", expired)
 
-        # 取候选
-        candidates = await self._repo.list_scored_candidates(
+        # 将高分推文加入候选池
+        high_scorers = await self._repo.list_scored_candidates(
             min_score=self.threshold,
-            limit=5,
+            limit=20,
         )
+        added_count = 0
+        source_label_map = {
+            "account": "账户", "keyword": "关键词",
+            "xai_fun": "趣文", "xai_viral": "关键词",
+        }
+        for c in high_scorers:
+            label = source_label_map.get(c.get("source_type", "account"), "账户")
+            was_added = await self._repo.add_to_pool(
+                tweet_external_id=c["external_id"],
+                source_label=label,
+                source_detail=c.get("source_value", c["handle"]),
+                score=c["filter_score"],
+                reason=c.get("filter_reason", ""),
+                preview_text=c["content"][:150],
+            )
+            if was_added:
+                added_count += 1
 
-        message = self._format_candidates(candidates) if candidates else None
         return {
             "fetched": fetched,
             "inserted": inserted,
             "scored": scored,
-            "candidates": candidates,
-            "message": message,
+            "added_count": added_count,
         }
 
-    def _format_candidates(
-        self,
-        candidates: list[dict],
-        new_ids: set[str] | None = None,
-    ) -> str:
-        """格式化候选推文列表为 Telegram 消息。"""
-        lines = ["📋 候选推文\n"]
-        for c in candidates:
-            preview = c["content"][:150].replace("\n", " ")
-            source_type = c.get("source_type", "account")
-            source_value = c.get("source_value", c["handle"])
-            if source_type == "keyword":
-                source_tag = f" （关键词: {source_value}）"
-            elif source_value != c["handle"]:
-                source_tag = f" （来自 @{source_value}）"
-            else:
-                source_tag = ""
+    @staticmethod
+    def _format_pool_candidates(candidates: list[dict]) -> str:
+        """格式化候选池列表为 Telegram 消息，带来源标签。"""
+        lines = [f"📋 候选推文 ({len(candidates)}条)\n"]
+        for i, c in enumerate(candidates, 1):
+            preview = (c.get("preview_text") or c.get("content", ""))[:150].replace("\n", " ")
+            label = c.get("source_label", "账户")
             title_line = f"「{c['preview_title']}」\n" if c.get("preview_title") else ""
-            new_badge = "🆕 " if (new_ids and c["external_id"] in new_ids) else ""
+            reason = c.get("filter_reason", "")
             lines.append(
-                f"{new_badge}📌 [{c['filter_score']:g}分] @{c['handle']}{source_tag}\n"
+                f"[{i}] 📌 [{c['filter_score']:g}分] [{label}] @{c['handle']}\n"
                 f"{title_line}"
                 f"{preview}...\n"
-                f"💡 {c['filter_reason']}\n"
+                f"💡 {reason}\n"
             )
         return "\n".join(lines)
 
-    @staticmethod
-    def _sort_candidates_new_first(
-        candidates: list[dict],
-        new_ids: set[str],
-    ) -> list[dict]:
-        """新推文置顶，其余按评分降序。"""
-        new = sorted(
-            [c for c in candidates if c["external_id"] in new_ids],
-            key=lambda c: c["filter_score"], reverse=True,
-        )
-        old = sorted(
-            [c for c in candidates if c["external_id"] not in new_ids],
-            key=lambda c: c["filter_score"], reverse=True,
-        )
-        return new + old
+    async def process_candidate(self, index: int, *, tweet_external_id: str | None = None) -> dict:
+        """用户确认后处理指定候选：翻译 + 截图 + 覆盖图 → 发送到 Telegram。
 
-    async def process_candidate(self, index: int) -> dict:
-        """用户确认后处理指定候选：翻译 + 截图 + 覆盖图 → 发送到 Telegram。"""
+        如果提供 tweet_external_id，直接按 ID 定位（确认流使用，避免 index 漂移）；
+        否则按 index 查找。
+        """
         await self.setup()
 
-        if not self._last_candidates or index < 1 or index > len(self._last_candidates):
-            raise ValueError(f"无效的候选序号 {index}，当前有 {len(self._last_candidates)} 条候选")
+        if tweet_external_id:
+            candidate = await self._repo.get_pool_candidate_by_id(tweet_external_id)
+        else:
+            candidate = await self._repo.get_pool_candidate_by_index(index)
+        if candidate is None:
+            pool_count = await self._repo.count_pool_active()
+            raise ValueError(f"无效的候选序号 {index}，当前有 {pool_count} 条候选")
 
-        candidate = self._last_candidates[index - 1]
-        tweet = await self._repo.get_tweet(candidate["external_id"])
+        tweet = await self._repo.get_tweet(candidate["tweet_external_id"])
         if tweet is None:
-            raise ValueError(f"找不到推文: {candidate['external_id']}")
+            raise ValueError(f"找不到推文: {candidate['tweet_external_id']}")
 
         # 长度检查
         text_only = _URL_RE.sub("", tweet.content).strip()
@@ -266,11 +258,36 @@ class Pipeline:
             raise ValueError("未配置 Telegram")
         await self._telegram.notify_content(payload)
 
-        # 标记 sent
+        # 标记 sent + 从池中移除
         await self._repo.save_sent(content)
+        await self._repo.mark_candidate_published(candidate["tweet_external_id"])
         self._cleanup_images(payload.get("cleanup_paths", []))
 
         return {"success": True, "title": content.title_zh, "handle": tweet.handle}
+
+    # ── 候选池操作 ──
+
+    async def view_candidates(self) -> dict:
+        """清理过期 → 查询候选池 → 格式化展示。"""
+        await self.setup()
+        await self._repo.expire_pool_candidates()
+        candidates = await self._repo.list_pool_candidates()
+        message = self._format_pool_candidates(candidates) if candidates else None
+        return {"candidates": candidates, "message": message, "count": len(candidates)}
+
+    async def skip_candidate(self, index: int) -> bool:
+        """跳过指定候选。"""
+        await self.setup()
+        candidate = await self._repo.get_pool_candidate_by_index(index)
+        if not candidate:
+            return False
+        await self._repo.dismiss_candidate(candidate["tweet_external_id"])
+        return True
+
+    async def skip_all_candidates(self) -> int:
+        """跳过所有候选，返回影响数。"""
+        await self.setup()
+        return await self._repo.dismiss_all_candidates()
 
     # ── 反馈方法 ──
 
@@ -287,10 +304,6 @@ class Pipeline:
         if self._threshold_override is not None:
             return self._threshold_override
         return self._config.filter.threshold
-
-    @property
-    def candidate_count(self) -> int:
-        return len(self._last_candidates)
 
     async def set_threshold(self, value: float) -> None:
         """运行时调整评分阈值（不持久化到 .env，重启恢复默认）。"""
@@ -421,7 +434,9 @@ class Pipeline:
 
     async def status(self) -> dict[str, int]:
         await self.setup()
-        return await self._repo.status_counts()
+        counts = await self._repo.status_counts()
+        counts["pool_active"] = await self._repo.count_pool_active()
+        return counts
 
     async def _build_payload(self, content: ProcessedContent, tweet: RawTweet) -> dict[str, object]:
         file_key = content.tweet_external_id.replace("/", "_").replace(":", "_")[-40:]
@@ -480,7 +495,70 @@ class Pipeline:
             self._cleanup_images(created_paths)
             raise
 
-    # ── 功能一：关键词爆文搜索 ──
+    # ── 功能一：关键词搜索入池 ──
+
+    async def keyword_search_to_pool(self, keyword: str) -> dict:
+        """关键词搜索精选 → 入池（不自动发送）。"""
+        await self.setup()
+
+        viral_min_faves = (
+            self._config.xai.viral_min_faves if self._config.xai else 500
+        )
+        viral_limit = (
+            self._config.xai.viral_candidate_limit if self._config.xai else 15
+        )
+
+        # Step 1: twscrape 高阈值预筛
+        candidates: list[RawTweet] = []
+        try:
+            candidates = await self._twscrape.fetch_keyword_tweets(
+                keyword, min_faves_override=viral_min_faves, limit=viral_limit
+            )
+            logger.info("twscrape 抓到 %d 条候选（关键词: %s）", len(candidates), keyword)
+        except Exception as exc:
+            logger.warning("twscrape 预筛失败: %s", exc)
+
+        # Step 2: 降级 — xAI x_search
+        if not candidates:
+            if self._xai is None:
+                return {"success": False, "reason": "twscrape 无结果且未配置 XAI_MODEL"}
+            logger.info("降级到 xAI x_search（关键词: %s）", keyword)
+            try:
+                candidates = await self._xai.search_viral_fallback(keyword, n=viral_limit)
+            except Exception as exc:
+                logger.error("xAI viral_fallback 失败: %s", exc)
+                return {"success": False, "reason": f"xAI 搜索失败: {exc}"}
+
+        if not candidates:
+            return {"success": False, "reason": f"关键词 [{keyword}] 未找到候选推文"}
+
+        # Step 3: AI 质量选择
+        selected = await self._viral_selector.select_best_tweet(keyword, candidates)
+
+        # Step 4: 保存到 DB + 评分 + 入池
+        await self._repo.save_tweets([selected])
+        await self._repo.save_score(
+            selected.external_id,
+            score=8.5,
+            reason=f"关键词精选: {keyword}",
+        )
+        added = await self._repo.add_to_pool(
+            tweet_external_id=selected.external_id,
+            source_label="关键词",
+            source_detail=keyword,
+            score=8.5,
+            reason=f"关键词精选: {keyword}",
+            preview_text=selected.content[:150],
+        )
+
+        return {
+            "success": True,
+            "added": 1 if added else 0,
+            "handle": selected.handle,
+            "source": "twscrape" if selected.source_type == "keyword" else "xai",
+        }
+
+    # ── 功能一（CLI）：关键词爆文搜索（保留给 main.py） ──
 
     async def keyword_viral(self, keyword: str) -> dict:
         """按关键词找最有价值的单条推文，翻译截图后发送到 Telegram。
@@ -595,23 +673,26 @@ class Pipeline:
             "message": message,
         }
 
-    async def discover_fun_tweets(self, n: int = 3) -> list[dict]:
-        """调用 xAI 发现本周有趣推文，保存到 DB 并标记高分（跳过正常评分）。"""
+    async def discover_fun_tweets(self, n: int = 3) -> dict:
+        """调用 xAI 发现本周有趣推文，保存到 DB 并入池。"""
         await self.setup()
 
+        _empty = {"items": [], "added_count": 0}
+
         if not self._xai:
-            return []
+            return _empty
 
         try:
             raw_tweets = await self._xai.search_fun_finds(n=n)
         except Exception as exc:
             logger.error("xAI search_fun_finds 失败: %s", exc)
-            return []
+            return _empty
 
         if not raw_tweets:
-            return []
+            return _empty
 
         await self._repo.save_tweets(raw_tweets)
+        added_count = 0
         for tweet in raw_tweets:
             await self._repo.save_score(
                 tweet.external_id,
@@ -619,8 +700,18 @@ class Pipeline:
                 reason="xAI fun find",
                 detail={"preview_title": tweet.source_value or "趣文发现"},
             )
+            added = await self._repo.add_to_pool(
+                tweet_external_id=tweet.external_id,
+                source_label="趣文",
+                source_detail=tweet.source_value or "趣文发现",
+                score=9.0,
+                reason="xAI fun find",
+                preview_text=tweet.content[:150],
+            )
+            if added:
+                added_count += 1
 
-        return [
+        items = [
             {
                 "external_id": t.external_id,
                 "handle": t.handle,
@@ -636,6 +727,7 @@ class Pipeline:
             }
             for t in raw_tweets
         ]
+        return {"items": items, "added_count": added_count}
 
     def _cleanup_images(self, images: list[str] | object) -> None:
         for image_str in images if isinstance(images, list) else []:
