@@ -444,7 +444,9 @@ class Pipeline:
 
         try:
             # 截图（X 平台内置翻译已在截图中；同时返回引用卡片底部 Y）
-            screenshot_result = await self._screenshotter.screenshot(tweet.url, file_key)
+            # 只对有具体 status URL 的推文截图，避免截到 profile 主页
+            has_status_url = "/status/" in tweet.url
+            screenshot_result = await self._screenshotter.screenshot(tweet.url, file_key) if has_status_url else None
             screenshot_path: Path | None = None
             quoted_bottom_y: int | None = None
             if screenshot_result:

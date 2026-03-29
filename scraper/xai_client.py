@@ -219,7 +219,10 @@ class XAIClient:
             fun_point = fun_m.group(1).strip() if fun_m else ""
 
             id_m = re.search(r"/status/(\d+)", url)
-            external_id = id_m.group(1) if id_m else f"xai_fun_{len(tweets)}"
+            if not id_m:
+                logger.warning("趣文缺少具体 tweet URL，跳过: handle=%s url=%s", handle, url)
+                continue
+            external_id = id_m.group(1)
 
             tweets.append(RawTweet(
                 external_id=external_id,
