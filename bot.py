@@ -515,10 +515,10 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
                 await msg.reply_text("候选池为空，暂无高分候选")
 
         elif action == "deliver":
-            # deliver 已改为展示候选池，引导用户用 approve 发布
+            # deliver 已改为展示候选池，引导用户用 approve 发送
             pool = await pipeline.view_candidates()
             if pool["message"]:
-                await msg.reply_text(f"{pool['message']}\n\n回复序号即可发布，如「发1」")
+                await msg.reply_text(f"{pool['message']}\n\n回复序号即可发送，如「发1」")
             else:
                 await msg.reply_text("候选池为空，请等待定时抓取或手动搜索")
 
