@@ -169,7 +169,7 @@ async def _unified_pool_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # 3. 每周：趣文发现
         if _should_run_weekly(pipeline, "_last_fun_run", now):
             try:
-                fun_results = await pipeline.discover_fun_tweets(n=3)
+                fun_results = await pipeline.discover_fun_tweets(n=1)
                 fun_items = fun_results.get("items", [])
                 fun_added = fun_results.get("added_count", 0)
                 if fun_added:

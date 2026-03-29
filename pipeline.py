@@ -675,7 +675,7 @@ class Pipeline:
             "message": message,
         }
 
-    async def discover_fun_tweets(self, n: int = 3) -> dict:
+    async def discover_fun_tweets(self, n: int = 1) -> dict:
         """调用 xAI 发现本周有趣推文，保存到 DB 并入池。"""
         await self.setup()
 
