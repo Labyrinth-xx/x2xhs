@@ -625,7 +625,7 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
                     f"找到这条：\n"
                     f"[{label}] @{c['handle']} [{c['filter_score']}分]\n\n"
                     f"{preview}...\n\n"
-                    f"是这条吗？"
+                    f"是这条吗？回复「发」或「确认」继续，「取消」放弃。"
                 )
                 context.user_data[_PENDING_INTENT_KEY] = Intent(
                     action="approve_candidate",
@@ -736,7 +736,7 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
         await msg.reply_text(f"❌ 执行出错：{exc}")
 
 
-_CONFIRM_YES = re.compile(r"^(确认|是|好|好的|可以|执行|对|嗯|行|ok|yes|✓)[\s!！。]*$", re.IGNORECASE)
+_CONFIRM_YES = re.compile(r"^(确认|是|好|好的|可以|执行|对|嗯|行|发|发这个|发出去|发出来|就这个|就发|这个|要|ok|yes|✓)[\s!！。]*$", re.IGNORECASE)
 _CONFIRM_NO = re.compile(r"^(取消|不|算了|不了|不要|不用|no|cancel|×)[\s!！。]*$", re.IGNORECASE)
 _PENDING_INTENT_KEY = "pending_intent"
 
