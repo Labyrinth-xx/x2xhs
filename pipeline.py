@@ -6,6 +6,7 @@ from pathlib import Path
 
 from config import AppConfig
 from processor.content_formatter import ContentFormatter
+from processor.context_enricher import ContextEnricher
 from processor.scorer import TweetScorer
 from processor.translator import ClaudeTranslator, TranslationSkipped
 from processor.viral_selector import ViralSelector
@@ -31,7 +32,8 @@ class Pipeline:
         self._repo = TweetRepository(self._database)
         self._rsshub = RSSHubClient(config.scraper)
         self._twscrape = TwscrapeClient(config.scraper)
-        self._translator = ClaudeTranslator(config.processor)
+        _enricher = ContextEnricher(config.processor.openrouter_api_key)
+        self._translator = ClaudeTranslator(config.processor, enricher=_enricher)
         self._scorer = TweetScorer(config.processor.openrouter_api_key, config.filter)
         self._formatter = ContentFormatter()
         self._threshold_override: float | None = None

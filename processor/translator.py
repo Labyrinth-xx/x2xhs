@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from config import ProcessorConfig
+from processor.context_enricher import ContextEnricher, ResearchBrief
 from processor.prompts import build_system_prompt
 from scraper.models import ProcessedContent, RawTweet
 
@@ -66,19 +67,28 @@ class TranslationPayload(BaseModel):
 
 
 class OpenRouterTranslator:
-    def __init__(self, config: ProcessorConfig) -> None:
+    def __init__(
+        self,
+        config: ProcessorConfig,
+        enricher: ContextEnricher | None = None,
+    ) -> None:
         self._client = AsyncOpenAI(
             api_key=config.openrouter_api_key,
             base_url=OPENROUTER_BASE_URL,
         )
         self._model = config.model
+        self._enricher = enricher
 
     async def translate(self, tweet: RawTweet) -> ProcessedContent:
         import re as _re
 
+        brief: ResearchBrief | None = None
+        if self._enricher is not None:
+            brief = await self._enricher.fetch(tweet)
+
         messages = [
             {"role": "system", "content": self._system_prompt()},
-            {"role": "user", "content": self._build_prompt(tweet)},
+            {"role": "user", "content": self._build_prompt(tweet, brief)},
         ]
         last_exc: Exception | None = None
         for attempt in range(3):
@@ -119,15 +129,18 @@ class OpenRouterTranslator:
     def _system_prompt(self) -> str:
         return build_system_prompt()
 
-    def _build_prompt(self, tweet: RawTweet) -> str:
+    def _build_prompt(self, tweet: RawTweet, brief: ResearchBrief | None = None) -> str:
         published_dt = tweet.published_at.astimezone(timezone.utc)
         display_name = _HANDLE_DISPLAY.get(tweet.handle.lower(), f"@{tweet.handle}")
-        return (
-            "请解读以下推文。\n"
-            f"发布者：{display_name}（@{tweet.handle}）\n"
-            f"发布日期：{published_dt.month}月{published_dt.day}日\n"
-            f"原文内容：\n{tweet.content}\n"
-        )
+        parts = [
+            "请解读以下推文。",
+            f"发布者：{display_name}（@{tweet.handle}）",
+            f"发布日期：{published_dt.month}月{published_dt.day}日",
+        ]
+        if brief is not None:
+            parts.append(brief.to_prompt_section())
+        parts.append(f"原文内容：\n{tweet.content}")
+        return "\n".join(parts) + "\n"
 
     async def translate_literal(self, tweet: RawTweet) -> str:
         """直译推文原文，忠实但语言自然，用于翻译卡片显示。"""
