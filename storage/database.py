@@ -7,6 +7,31 @@ from typing import AsyncIterator
 import aiosqlite
 
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS keyword_queries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL,
+    query_template TEXT NOT NULL UNIQUE,
+    min_faves INTEGER NOT NULL DEFAULT 300,
+    priority INTEGER NOT NULL DEFAULT 2,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    hit_count INTEGER NOT NULL DEFAULT 0,
+    last_hit_at TEXT,
+    added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    retired_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sweep_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sweep_id TEXT NOT NULL,
+    total_fetched INTEGER NOT NULL,
+    unique_after_dedup INTEGER NOT NULL,
+    events_merged INTEGER NOT NULL DEFAULT 0,
+    candidates_added INTEGER NOT NULL,
+    duration_seconds REAL,
+    errors_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS tweets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     external_id TEXT NOT NULL UNIQUE,
@@ -106,7 +131,7 @@ class Database:
             except Exception:
                 pass  # Column already exists — safe to ignore
             # Migration: add filter_score / filter_reason / preview_title to tweets (idempotent)
-            for col, col_type in [("filter_score", "REAL"), ("filter_reason", "TEXT"), ("filter_scores_detail", "TEXT"), ("preview_title", "TEXT")]:
+            for col, col_type in [("filter_score", "REAL"), ("filter_reason", "TEXT"), ("filter_scores_detail", "TEXT"), ("preview_title", "TEXT"), ("credibility_note", "TEXT"), ("sweep_category", "TEXT")]:
                 try:
                     await conn.execute(f"ALTER TABLE tweets ADD COLUMN {col} {col_type}")
                 except Exception:

@@ -265,6 +265,14 @@ class TweetRepository:
                 (score, reason, detail_json, preview_title, external_id),
             )
 
+    async def save_credibility_note(self, external_id: str, note: str) -> None:
+        """保存事实核查备注到 tweets.credibility_note 列。"""
+        async with self._database.connect() as conn:
+            await conn.execute(
+                "UPDATE tweets SET credibility_note = ? WHERE external_id = ?",
+                (note, external_id),
+            )
+
     async def list_unscored_tweets(self, limit: int = 50, published_within_hours: int = 168) -> list[RawTweet]:
         async with self._database.connect() as conn:
             cursor = await conn.execute(
@@ -557,6 +565,120 @@ class TweetRepository:
             )
             row = await cursor.fetchone()
         return int(row["total"])
+
+    # ── keyword_queries CRUD ──
+
+    async def list_keyword_queries(self, enabled_only: bool = True) -> list[dict]:
+        """返回 keyword_queries 表中的查询列表。"""
+        sql = "SELECT * FROM keyword_queries"
+        if enabled_only:
+            sql += " WHERE enabled = 1 AND retired_at IS NULL"
+        sql += " ORDER BY priority ASC, added_at ASC"
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(sql)
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def add_keyword_query(
+        self,
+        category: str,
+        query_template: str,
+        min_faves: int,
+        priority: int,
+    ) -> bool:
+        """插入新查询，已存在则忽略。返回 True 表示新增成功。"""
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                """
+                INSERT OR IGNORE INTO keyword_queries
+                    (category, query_template, min_faves, priority)
+                VALUES (?, ?, ?, ?)
+                """,
+                (category, query_template, min_faves, priority),
+            )
+        return cursor.rowcount > 0
+
+    async def update_keyword_query_hits(self, query_id: int) -> None:
+        """更新命中计数和最近命中时间。"""
+        async with self._database.connect() as conn:
+            await conn.execute(
+                """
+                UPDATE keyword_queries
+                SET hit_count = hit_count + 1, last_hit_at = datetime('now')
+                WHERE id = ?
+                """,
+                (query_id,),
+            )
+
+    async def retire_keyword_query(self, query_id: int) -> bool:
+        """将查询标记为退役（软删除）。"""
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                "UPDATE keyword_queries SET retired_at = datetime('now'), enabled = 0 WHERE id = ?",
+                (query_id,),
+            )
+        return cursor.rowcount > 0
+
+    # ── sweep_log ──
+
+    async def save_sweep_log(
+        self,
+        sweep_id: str,
+        total_fetched: int,
+        unique_after_dedup: int,
+        events_merged: int,
+        candidates_added: int,
+        duration_seconds: float | None,
+        errors: list[str] | None,
+    ) -> None:
+        """写入一条 sweep 运行记录。"""
+        async with self._database.connect() as conn:
+            await conn.execute(
+                """
+                INSERT INTO sweep_log
+                    (sweep_id, total_fetched, unique_after_dedup, events_merged,
+                     candidates_added, duration_seconds, errors_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sweep_id,
+                    total_fetched,
+                    unique_after_dedup,
+                    events_merged,
+                    candidates_added,
+                    duration_seconds,
+                    json.dumps(errors) if errors else None,
+                ),
+            )
+
+    async def list_recent_sweep_stats(self, days: int = 7) -> list[dict]:
+        """返回最近 N 天的 sweep 记录，用于关键词刷新分析。"""
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT * FROM sweep_log
+                WHERE created_at >= datetime('now', ? || ' days')
+                ORDER BY created_at DESC
+                """,
+                (f"-{days}",),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # ── batch_check_exists ──
+
+    async def batch_check_exists(self, external_ids: list[str]) -> set[str]:
+        """批量检查哪些 external_id 已存在于 tweets 表，返回已存在的 id 集合。"""
+        if not external_ids:
+            return set()
+        placeholders = ",".join("?" * len(external_ids))
+        async with self._database.connect() as conn:
+            cursor = await conn.execute(
+                f"SELECT external_id FROM tweets WHERE external_id IN ({placeholders})",
+                external_ids,
+            )
+            rows = await cursor.fetchall()
+        return {str(row["external_id"]) for row in rows}
 
     def _row_to_tweet(self, row: object) -> RawTweet:
         return RawTweet(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -109,6 +110,98 @@ class XAIClient:
         text = response.choices[0].message.content or ""
         return self._parse_fun_tweets(text)
 
+    # ── 关键词扫描支持 ──
+
+    async def cluster_events(self, tweets_block: str, count: int) -> list[dict]:
+        """将多条推文摘要按底层事件分组，返回 MERGE/BEST/KEEP 决策列表。
+
+        prompt 内容由 Opus 实现（build_event_cluster_prompt）。
+        失败时返回空列表，由调用方降级为全部 KEEP。
+        """
+        from processor.prompts import build_event_cluster_prompt
+
+        prompt = build_event_cluster_prompt(tweets_block, count)
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._config.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1500,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            text = _CITATION_RE.sub("", text).strip()
+            return self._parse_json_array(text)
+        except Exception as exc:
+            logger.warning("事件聚类失败: %s", exc)
+            return []
+
+    async def fact_check(self, handle: str, content: str) -> dict:
+        """核查推文声明可信度，返回 {verifiable, credibility, note}。
+
+        prompt 内容由 Opus 实现（build_fact_check_prompt）。
+        失败时返回保守默认值（不阻断流程）。
+        """
+        from processor.prompts import build_fact_check_prompt
+
+        prompt = build_fact_check_prompt(handle, content)
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._config.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300,
+                extra_body={"plugins": [{"id": "web"}]},
+            )
+            text = (response.choices[0].message.content or "").strip()
+            text = _CITATION_RE.sub("", text).strip()
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                return dict(json.loads(match.group()))
+        except Exception as exc:
+            logger.warning("事实核查失败 @%s: %s", handle, exc)
+        return {"verifiable": None, "credibility": "unknown", "note": "核查失败"}
+
+    async def suggest_keyword_updates(self, queries_stats: str) -> list[dict]:
+        """分析当前查询命中率 + 行业热点，建议关键词 add/retire/modify。
+
+        prompt 内容由 Opus 实现（build_keyword_refresh_prompt）。
+        失败时返回空列表。
+        """
+        from processor.prompts import build_keyword_refresh_prompt
+
+        prompt = build_keyword_refresh_prompt(queries_stats)
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._config.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1000,
+                extra_body={"plugins": [{"id": "web"}]},
+            )
+            text = (response.choices[0].message.content or "").strip()
+            text = _CITATION_RE.sub("", text).strip()
+            return self._parse_json_array(text)
+        except Exception as exc:
+            logger.warning("关键词刷新建议失败: %s", exc)
+            return []
+
+    async def merge_cluster_digest(
+        self, event_label: str, tweets_text: str, citation_urls: tuple[str, ...]
+    ) -> DigestContent:
+        """将多条同事件推文综合为一篇中文综述。
+
+        由 EventDeduplicator.merge_to_digest() 调用。
+        """
+        from processor.prompts import build_merge_digest_prompt
+
+        prompt = build_merge_digest_prompt(event_label, tweets_text)
+        response = await self._client.chat.completions.create(
+            model=self._config.model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1500,
+            extra_body={"plugins": [{"id": "web"}]},
+        )
+        text = (response.choices[0].message.content or "").strip()
+        text = _CITATION_RE.sub("", text).strip()
+        return self._parse_digest(event_label, text, citation_urls)
+
     # ── 解析工具 ──
 
     def _extract_citations(self, response) -> tuple[str, ...]:
@@ -135,7 +228,7 @@ class XAIClient:
         tags: list[str] = []
 
         title_match = re.search(r"标题[：:]\s*(.+)", clean)
-        body_match = re.search(r"正文[：:]\s*([\s\S]+?)(?=标签[：:]|$)", clean)
+        body_match = re.search(r"正文[：:]\s*([\s\S]+?)(?=\n标签[：:]|$)", clean)
         tags_match = re.search(r"标签[：:]\s*(.+)", clean)
 
         if title_match:
@@ -238,3 +331,13 @@ class XAIClient:
             logger.warning("xAI fun_finds 解析失败，文本长度=%d", len(text))
 
         return tweets
+
+    def _parse_json_array(self, text: str) -> list[dict]:
+        """从文本中提取 JSON 数组，解析失败返回空列表。"""
+        try:
+            match = re.search(r"\[.*\]", text, re.DOTALL)
+            if match:
+                return list(json.loads(match.group()))
+        except Exception as exc:
+            logger.debug("JSON 数组解析失败: %s | text[:200]=%r", exc, text[:200])
+        return []

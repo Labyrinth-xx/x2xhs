@@ -210,6 +210,205 @@ _SCORER_TEMPLATE = (
 )
 
 
+# ── 关键词推文评分 prompt（5 维度） ──
+
+_KEYWORD_SCORER_TEMPLATE = (
+    "你是一个内容策展人，负责从 Twitter 关键词搜索结果中筛选值得翻译发布到小红书的内容。\n\n"
+
+    "这些推文来自关键词搜索（类别：{category}），作者可能是你不认识的人。\n"
+    "你的工作是判断：这条推文值不值得翻译成中文发到小红书？\n\n"
+
+    "你的读者对全球科技有好奇心，期待看到国内刷不到的一手信息。\n\n"
+
+    "## 五个维度（各自 1-10 分）\n\n"
+
+    "1. **新闻价值 (newsworthiness)**：这是正在发生的实质性事件吗？\n"
+    "   新产品发布、重大融资、政策变动、技术突破——高。\n"
+    "   个人观点、泛泛评论、旧闻转述、没有新信息的讨论——低。\n"
+    "   「评论一件事」和「报道一件事」区别很大：前者低，后者高。\n\n"
+
+    "2. **信息差 (info_diff)**：这条信息在中文互联网容易看到吗？\n"
+    "   只有英文一手源才知道的、国内尚未报道的→高。\n"
+    "   国内科技媒体已铺天盖地报道了（如大厂发布会当天新闻）→即使重要也不高。\n\n"
+
+    "3. **来源可信度 (source_authority)**：发布者在该话题上是否可信？\n"
+    "   当事人/业内资深从业者/知名记者→高。\n"
+    "   认证账号/有明确专业背景→中。\n"
+    "   匿名小号/不明背景/营销号→低。\n"
+    "   推文本身包含可验证的具体事实（数据、链接、截图）可适当提分。\n\n"
+
+    "4. **内容纵深 (depth)**：素材够不够厚？能展开写成一篇有结构的帖子吗？\n"
+    "   有具体数据、时间线、多方信息→高。只有一句话断言→低。\n\n"
+
+    "5. **传播势能 (viral)**：读者看完会想分享、收藏或表达看法吗？\n\n"
+
+    "## 评分标准（严格执行）\n\n"
+
+    "大多数关键词搜索结果是噪音。你的任务是从中挑出真正值得发的。\n"
+    "- 7 分以上：新闻价值和信息差都要强\n"
+    "- 8 分以上极少给\n"
+    "- 纯观点、缺乏具体事实→ newsworthiness 上限 5\n"
+    "- 来源不明→ source_authority 上限 4\n\n"
+
+    "推文作者：{handle}\n"
+    "搜索类别：{category}\n"
+    "推文内容：{content}\n\n"
+
+    "## 输出\n\n"
+
+    "返回 JSON，不加注释或额外文字：\n"
+    "{{\"newsworthiness\": _, \"info_diff\": _, \"source_authority\": _, "
+    "\"depth\": _, \"viral\": _, \"reason\": \"...\", \"preview_title\": \"...\"}}\n\n"
+    "- 各维度 1-10（可用小数）\n"
+    "- reason：2-3 句中文——①具体讲了什么事实 ②来源是否可信 ③对中文读者的价值\n"
+    "- preview_title：15 字以内中文标题，言之有物，禁用夸张词"
+)
+
+# ── 事件聚类 prompt ──
+
+_EVENT_CLUSTER_TEMPLATE = (
+    "你是一位新闻编辑。下面是 {count} 条从 Twitter 关键词搜索获取的推文摘要。\n"
+    "多条推文可能在讨论同一个底层事件。\n\n"
+
+    "任务：\n"
+    "1. 识别底层事件——哪些推文在讨论同一件事？\n"
+    "2. 对每个事件组决定处理策略：\n"
+    "   - **MERGE**：3+ 条推文讨论同一事件且各有独特信息 → 合并为综合报道\n"
+    "   - **BEST**：2+ 条讨论同一事件但信息高度重叠 → 选信息量最大的一条\n"
+    "   - **KEEP**：独立话题，无其他推文相关 → 保留原样\n\n"
+
+    "判断标准：\n"
+    "- 同一事件 = 讨论同一个具体事实（如「OpenAI 发布 GPT-5」）。\n"
+    "  仅话题相似（如都在聊 AI）不算同一事件。\n"
+    "- MERGE：一组推文各有独特事实（不同角度/信源），合并能产出更丰富内容。\n"
+    "- BEST：一组推文信息高度重叠，选一条就够了。\n"
+    "- 单条推文必须标 KEEP，不可标 MERGE 或 BEST。\n\n"
+
+    "推文列表：\n"
+    "{tweets_block}\n\n"
+
+    "返回 JSON 数组，每个元素一个事件组，不加额外文字：\n"
+    "[{{\"event\": \"一句话描述底层事件\", \"tweet_ids\": [\"id1\", \"id2\"], "
+    "\"action\": \"MERGE|BEST|KEEP\"}}]\n\n"
+
+    "注意：tweet_ids 用推文列表中 [id] 里的编号；每条推文只属于一个组。"
+)
+
+# ── 事实核查 prompt ──
+
+_FACT_CHECK_TEMPLATE = (
+    "你是一位事实核查员。请验证以下推文中核心声明的可信度。\n\n"
+
+    "推文作者：@{handle}\n"
+    "推文内容：{content}\n\n"
+
+    "请搜索验证：\n"
+    "1. 核心声明能否被独立信源确认或否认？\n"
+    "2. @{handle} 在该话题上是否是可信来源？\n\n"
+
+    "判断标准：\n"
+    "- verifiable=true：核心声明可被独立信源确认（无论对错）\n"
+    "- verifiable=false：无法独立验证（纯个人观点/主观判断/未公开信息）\n"
+    "- credibility：\n"
+    "  high — 当事人/权威机构/知名记者 且声明与已知事实一致\n"
+    "  medium — 有专业背景但无法完全确认\n"
+    "  low — 声明与已知事实矛盾或来源不可靠\n"
+    "  unknown — 无法判断\n\n"
+
+    "返回 JSON，不加额外文字：\n"
+    "{{\"verifiable\": true/false, \"credibility\": \"high/medium/low/unknown\", "
+    "\"note\": \"一句话核查结论\"}}"
+)
+
+# ── 关键词刷新建议 prompt ──
+
+_KEYWORD_REFRESH_TEMPLATE = (
+    "你是一位 AI/科技行业分析师，负责优化 Twitter 关键词搜索查询。\n\n"
+
+    "当前查询列表和最近 7 天扫描统计：\n\n"
+    "{queries_stats}\n\n"
+
+    "请分析：\n"
+    "1. 哪些查询命中率低或已过时？考虑 retire\n"
+    "2. 最近一周 AI/科技行业有哪些新热点值得跟踪？考虑 add\n"
+    "3. 现有查询措辞能否优化？考虑 modify\n\n"
+
+    "建议原则：\n"
+    "- 使用 Twitter 高级搜索语法（OR、括号分组、\"精确短语\"）\n"
+    "- 每条查询在 min_faves 过滤后应每天产出 5-20 条结果\n"
+    "- 太宽泛（数百条/天）或太窄（几天 0 条）都需要调整\n"
+    "- category 可选：model_release, ai_app, infra, industry, regulation\n"
+    "- 总查询数保持 8-12 条\n\n"
+
+    "返回 JSON 数组，不加额外文字：\n"
+    "[{{\"action\": \"add|retire|modify\", \"category\": \"类别\", "
+    "\"query\": \"查询字符串\", \"reason\": \"理由\", \"confidence\": 0.0-1.0}}]\n\n"
+
+    "confidence：0.8+ 强烈建议，0.5-0.8 建议，<0.5 可观望。"
+)
+
+# ── MERGE 聚类综合报道 prompt ──
+
+_MERGE_DIGEST_TEMPLATE = (
+    "你是一位科技新闻编辑。以下多条推文在讨论同一事件：「{event_label}」。\n"
+    "请综合这些推文的信息，写一篇面向中国小红书读者的中文综合报道。\n\n"
+
+    "推文原文：\n"
+    "{tweets_text}\n\n"
+
+    "要求：\n"
+    "- 综合各条推文中的独特事实，不是逐条翻译\n"
+    "- 理清事件时间线和因果关系\n"
+    "- 用自己的话写，语气像消息灵通的朋友在讲事\n"
+    "- 不要用官媒腔或标题党\n\n"
+
+    "严格按以下格式输出（方便解析）：\n"
+    "标题：（15字内，言之有物）\n"
+    "正文：（400-800字，分段）\n"
+    "标签：（5个话题标签，空格分隔，不含#号）"
+)
+
+
+def build_keyword_scorer_prompt(
+    handle: str,
+    content: str,
+    category: str,
+    feedback_lines: list[str] | None = None,
+) -> str:
+    """构建关键词推文专用评分 prompt（5 维度）。"""
+    prompt = _KEYWORD_SCORER_TEMPLATE.format(
+        handle=handle, content=content, category=category,
+    )
+    if feedback_lines:
+        prompt += "\n\n## 编辑最近的反馈（请据此校准你的判断）\n"
+        prompt += "\n".join(f"- {line}" for line in feedback_lines)
+    return prompt
+
+
+def build_event_cluster_prompt(tweets_block: str, count: int) -> str:
+    """构建事件聚类 prompt。"""
+    return _EVENT_CLUSTER_TEMPLATE.format(
+        tweets_block=tweets_block, count=count,
+    )
+
+
+def build_fact_check_prompt(handle: str, content: str) -> str:
+    """构建事实核查 prompt。"""
+    return _FACT_CHECK_TEMPLATE.format(handle=handle, content=content)
+
+
+def build_keyword_refresh_prompt(queries_stats: str) -> str:
+    """构建关键词刷新建议 prompt。"""
+    return _KEYWORD_REFRESH_TEMPLATE.format(queries_stats=queries_stats)
+
+
+def build_merge_digest_prompt(event_label: str, tweets_text: str) -> str:
+    """构建 MERGE 聚类综合报道 prompt。"""
+    return _MERGE_DIGEST_TEMPLATE.format(
+        event_label=event_label, tweets_text=tweets_text,
+    )
+
+
 def build_scorer_prompt(
     handle: str,
     content: str,

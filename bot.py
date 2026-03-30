@@ -92,6 +92,7 @@ async def _post_init(application: Application) -> None:
         BotCommand("add", "添加监控账号"),
         BotCommand("remove", "删除监控账号"),
         BotCommand("keywords", "监控关键词列表"),
+        BotCommand("sweep", "立即执行关键词扫描"),
         BotCommand("status", "查看系统状态"),
         BotCommand("digest", "话题综述（xAI）"),
         BotCommand("pause", "暂停自动推送"),
@@ -127,6 +128,17 @@ def _should_run_weekly(pipeline: Pipeline, attr: str, now: datetime.datetime) ->
     return (now - datetime.datetime.fromtimestamp(last_run)).days >= 6
 
 
+def _should_run_periodic(
+    pipeline: Pipeline, attr: str, now: datetime.datetime, hours: int
+) -> bool:
+    """检查是否应执行周期任务（上次运行超过 N 小时）。"""
+    last_run = getattr(pipeline, attr, None)
+    if last_run is None:
+        return True
+    elapsed = (now - datetime.datetime.fromtimestamp(last_run)).total_seconds()
+    return elapsed >= hours * 3600
+
+
 async def _unified_pool_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """统一定时任务：每小时抓取账户 + 按需执行周任务（关键词/趣文）→ 入池 → 通知。"""
     config = context.application.bot_data.get(_BOT_DATA_CONFIG_KEY)
@@ -150,21 +162,50 @@ async def _unified_pool_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             added_count = 0
             logger.info("定时任务：无监控账号，跳过账户抓取")
 
-        # 2. 每周：关键词搜索
-        if _should_run_weekly(pipeline, "_last_keyword_run", now):
-            keywords = await pipeline.list_keywords()
-            kw_any_succeeded = False
-            for kw in keywords:
-                try:
-                    kw_result = await pipeline.keyword_search_to_pool(kw)
-                    if kw_result.get("success"):
-                        added_count += kw_result.get("added", 0)
-                        logger.info("关键词搜索完成: %s → @%s", kw, kw_result.get("handle"))
-                        kw_any_succeeded = True
-                except Exception as exc:
-                    logger.warning("关键词搜索失败 [%s]: %s", kw, exc)
-            if kw_any_succeeded:
-                pipeline._last_keyword_run = now.timestamp()
+        # 2. 每 8 小时：关键词扫描（替代原来的每周单关键词搜索）
+        sweep_interval = (
+            config.xai.sweep_interval_hours if config.xai else 8
+        )
+        if _should_run_periodic(pipeline, "_last_sweep_run", now, hours=sweep_interval):
+            try:
+                sweep_result = await pipeline.keyword_sweep()
+                if sweep_result.get("success"):
+                    sweep_added = sweep_result.get("candidates_added", 0)
+                    added_count += sweep_added
+                    logger.info(
+                        "关键词扫描完成: fetched=%d dedup=%d merged=%d added=%d (%.1fs)",
+                        sweep_result.get("total_fetched", 0),
+                        sweep_result.get("unique_after_dedup", 0),
+                        sweep_result.get("events_merged", 0),
+                        sweep_added,
+                        sweep_result.get("duration_seconds", 0),
+                    )
+            except Exception as exc:
+                logger.warning("关键词扫描失败: %s", exc)
+
+        # 3a. 每周：关键词刷新建议（xAI 分析，推送建议给用户）
+        if _should_run_weekly(pipeline, "_last_refresh_run", now):
+            try:
+                refresh_result = await pipeline.keyword_refresh()
+                suggestions = refresh_result.get("suggestions", [])
+                if suggestions and config.telegram:
+                    from telegram import Bot
+                    bot_obj = Bot(token=config.telegram.bot_token)
+                    lines = ["🔧 关键词刷新建议（xAI 分析）："]
+                    for i, s in enumerate(suggestions[:5], 1):
+                        action = s.get("action", "?")
+                        category = s.get("category", "?")
+                        query = s.get("query", "?")[:60]
+                        reason = s.get("reason", "")[:80]
+                        lines.append(f"{i}. [{action}] {category}: {query}\n   理由: {reason}")
+                    lines.append("\n如需应用，请回复「关键词建议 接受/拒绝 N」")
+                    await bot_obj.send_message(
+                        chat_id=config.telegram.chat_id,
+                        text="\n".join(lines),
+                    )
+                    logger.info("关键词刷新建议已推送: %d 条", len(suggestions))
+            except Exception as exc:
+                logger.warning("关键词刷新失败: %s", exc)
 
         # 3. 每周：趣文发现
         if _should_run_weekly(pipeline, "_last_fun_run", now):
@@ -271,6 +312,28 @@ async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.effective_message.reply_text(f"❌ 生成失败：{result['reason']}")
 
 
+async def sweep_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """手动触发关键词扫描：/sweep"""
+    config, pipeline = _get_pipeline(context)
+    if not await _ensure_allowed(update, config):
+        return
+    await update.effective_message.reply_text("⏳ 正在执行关键词扫描，约需 30-60 秒...")
+    result = await pipeline.keyword_sweep()
+    if result.get("success"):
+        pool = await pipeline.view_candidates()
+        reply = (
+            f"✅ 关键词扫描完成\n"
+            f"抓取 {result.get('total_fetched', 0)} 条 → "
+            f"去重后 {result.get('unique_after_dedup', 0)} 条 → "
+            f"新增候选 {result.get('candidates_added', 0)} 条"
+        )
+        if pool["message"]:
+            reply += f"\n\n{pool['message']}"
+        await update.effective_message.reply_text(reply)
+    else:
+        await update.effective_message.reply_text(f"❌ 扫描失败：{result.get('reason', '未知')}")
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config, _ = _get_pipeline(context)
     if not await _ensure_allowed(update, config):
@@ -281,7 +344,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "",
             "三条线自动运作，内容统一进入候选池：",
             "  📌 账户监控 — 每小时自动抓取评分",
-            "  🔍 关键词搜索 — 每周自动精选",
+            "  🔍 关键词扫描 — 每 8 小时自动全面扫描",
             "  🎭 趣文发现 — 每周自动发现",
             "",
             "日常用自然语言操作即可：",
@@ -292,7 +355,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "命令参考：",
             "/scores 最近评分  /threshold 阈值  /feedback 反馈",
             "/accounts 账号  /add /remove 增删账号",
-            "/keywords 关键词  /status 状态",
+            "/keywords 关键词  /sweep 立即扫描  /status 状态",
             "/digest <关键词> 话题综述",
             "/pause 暂停  /resume 恢复",
         ])
@@ -715,6 +778,58 @@ async def _execute_intent(update: Update, pipeline: Pipeline, intent: Intent, co
                     )
                 await msg.reply_text("\n".join(lines))
 
+        elif action == "keyword_sweep":
+            await msg.reply_text("⏳ 正在执行关键词扫描，约需 30-60 秒...")
+            result = await pipeline.keyword_sweep()
+            if result.get("success"):
+                pool = await pipeline.view_candidates()
+                reply = (
+                    f"✅ 关键词扫描完成\n"
+                    f"抓取 {result.get('total_fetched', 0)} 条 → "
+                    f"去重后 {result.get('unique_after_dedup', 0)} 条 → "
+                    f"新增候选 {result.get('candidates_added', 0)} 条"
+                )
+                if pool["message"]:
+                    reply += f"\n\n{pool['message']}"
+                await msg.reply_text(reply)
+            else:
+                await msg.reply_text(f"❌ 扫描失败：{result.get('reason', '未知')}")
+
+        elif action == "list_keyword_queries":
+            queries = await pipeline.list_keyword_queries(enabled_only=False)
+            if not queries:
+                await msg.reply_text("当前没有关键词搜索查询（默认查询将在首次扫描时加载）。")
+                return
+            lines = ["🔍 关键词搜索查询：\n"]
+            by_cat: dict[str, list] = {}
+            for q in queries:
+                cat = q.get("category", "other")
+                by_cat.setdefault(cat, []).append(q)
+            for cat, qs in by_cat.items():
+                lines.append(f"【{cat}】")
+                for q in qs:
+                    status = "✅" if q.get("enabled") else "❌"
+                    hits = q.get("hit_count", 0)
+                    lines.append(f"  {status} {q['query_template'][:60]} (min_faves={q['min_faves']}, hits={hits})")
+            await msg.reply_text("\n".join(lines))
+
+        elif action == "keyword_refresh":
+            await msg.reply_text("⏳ 正在分析关键词，请求 xAI 建议，约需 15 秒...")
+            result = await pipeline.keyword_refresh()
+            suggestions = result.get("suggestions", [])
+            if not suggestions:
+                await msg.reply_text("暂时没有关键词调整建议（可能是 xAI 未配置或无新建议）。")
+                return
+            lines = ["🔧 关键词刷新建议：\n"]
+            for i, s in enumerate(suggestions[:8], 1):
+                action_tag = s.get("action", "?")
+                category = s.get("category", "?")
+                query = s.get("query", "?")[:60]
+                reason = s.get("reason", "")[:80]
+                lines.append(f"{i}. [{action_tag}] {category}: {query}\n   理由: {reason}")
+            lines.append("\n如需应用，请联系管理员或等待每周自动确认。")
+            await msg.reply_text("\n".join(lines))
+
         elif action == "clarify":
             # Bot 反问用户以确认意图，reply 字段包含反问内容
             pass  # reply 已在上面发送
@@ -813,6 +928,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("remove", remove_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("keywords", keywords_command))
+    application.add_handler(CommandHandler("sweep", sweep_command))
     application.add_handler(CommandHandler("feedback", feedback_command))
     application.add_handler(CommandHandler("threshold", threshold_command))
     application.add_handler(CommandHandler("scores", scores_command))

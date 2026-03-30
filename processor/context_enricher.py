@@ -101,6 +101,73 @@ _QUERY_TEMPLATE = """\
 只返回 JSON。\
 """
 
+# 关键词推文变体：未知作者场景，将 author_recent 改为身份确认
+_KEYWORD_QUERY_TEMPLATE = """\
+你是一位调查记者。你的工作方式是：从公开信息中找到别人不容易注意到的事实和关联——\
+不是写百科词条，而是像深度报道记者那样挖掘具体的、有时间线的、可验证的事实。
+
+你的任务：为以下推文做背景调研。\
+调研结果将提供给一位中文内容作者，帮助他写出有充分事实根据的文章。\
+作者的读者是中国小红书上对全球科技和时政感兴趣的普通人。
+
+---
+
+推文信息：
+发布者：@{handle}
+发布日期：{year}年{month}月{day}日
+推文内容：
+{tweet_content}
+
+---
+
+请通过网络搜索，就以下三个维度提供背景事实。
+
+**1. 发布者身份与可信度（author_recent）**
+
+这个人是谁？他的职业身份、所属机构、在该话题上的资历。\
+判断他发这条推文的可信度——是当事人/业内专家/知名记者，还是不明背景的账号？
+
+质量标准——
+好的调研："@handle 是 X 公司 CTO，此前在 Y 实验室工作 5 年，是该领域的直接从业者。"
+差的调研："@handle 是一个推特用户。"
+如果搜索后仍无法确定身份，返回空字符串 ""，不要猜测。
+
+**2. 相关事件脉络（event_context）**
+
+与这条推文主题直接相关的事件：起因、关键节点、当前进展。\
+按时间顺序整理，每个事件附上具体日期（X月X日）。\
+这是最重要的维度——如果只能写好一个，写好这个。
+
+**3. 值得注意的关联（notable_connections）**
+
+调研中发现的、从推文本身不容易看出来的事实关联。比如：
+- 时间巧合："这条推文发布于 XX 宣布新一轮融资的同一天"
+- 利害关系："发布者的公司在该领域与推文中提到的机构存在直接竞争"
+
+只报告你能通过搜索确认的事实关联。\
+不要做主观推测——那是作者的工作。\
+如果没有发现值得注意的关联，返回空字符串。
+
+---
+
+调研要求：
+- 优先搜索最近 30 天的信息；需要时回溯至 3-6 个月
+- 优先一手信源：官方声明、直接引言、监管文件
+- 给出具体日期（X月X日），不用"最近""近期"等模糊词
+- 三个维度合计 300-800 字，按信息量自行分配
+- 某个维度找不到实质性信息时，返回空字符串 ""
+
+以 JSON 格式返回，不要加引用标记，不要加前缀或后缀：
+
+{{
+  "author_recent": "发布者身份与可信度的段落",
+  "event_context": "相关事件脉络的段落",
+  "notable_connections": "值得注意的关联的段落"
+}}
+
+只返回 JSON。\
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class ResearchBrief:
@@ -183,7 +250,22 @@ class ContextEnricher:
 
     def _build_query(self, tweet: RawTweet) -> str:
         published_dt = tweet.published_at.astimezone(timezone.utc)
-        display_name = _HANDLE_DISPLAY.get(tweet.handle.lower(), f"@{tweet.handle}")
+        handle_lower = tweet.handle.lower()
+        is_known = handle_lower in _HANDLE_DISPLAY
+
+        # 关键词推文且未知作者 → 用身份确认版 prompt
+        if not is_known and tweet.source_type in (
+            "keyword_sweep", "keyword_merge",
+        ):
+            return _KEYWORD_QUERY_TEMPLATE.format(
+                handle=tweet.handle,
+                year=published_dt.year,
+                month=published_dt.month,
+                day=published_dt.day,
+                tweet_content=tweet.content[:800],
+            )
+
+        display_name = _HANDLE_DISPLAY.get(handle_lower, f"@{tweet.handle}")
         return _QUERY_TEMPLATE.format(
             display_name=display_name,
             handle=tweet.handle,

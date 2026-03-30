@@ -94,6 +94,9 @@ class XAIConfig:
     model: str = "x-ai/grok-4-fast"
     viral_min_faves: int = 500
     viral_candidate_limit: int = 15
+    sweep_interval_hours: int = 8
+    sweep_max_queries: int = 10
+    keyword_score_threshold: float = 7.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +161,9 @@ def load_config() -> AppConfig:
             model=xai_model,
             viral_min_faves=_parse_int("VIRAL_MIN_FAVES", "500"),
             viral_candidate_limit=_parse_int("VIRAL_CANDIDATE_LIMIT", "15"),
+            sweep_interval_hours=_parse_int("SWEEP_INTERVAL_HOURS", "8"),
+            sweep_max_queries=_parse_int("SWEEP_MAX_QUERIES", "10"),
+            keyword_score_threshold=_parse_float("KEYWORD_SCORE_THRESHOLD", "7.0"),
         )
         if xai_model
         else None

@@ -7,12 +7,16 @@ from pathlib import Path
 from config import AppConfig
 from processor.content_formatter import ContentFormatter
 from processor.context_enricher import ContextEnricher
+from processor.event_dedup import EventDeduplicator
+from processor.keyword_refresh import KeywordRefresher
+from processor.keyword_sweep import KeywordSweepRunner, SweepResult
 from processor.scorer import TweetScorer
 from processor.translator import ClaudeTranslator, TranslationSkipped
 from processor.viral_selector import ViralSelector
 from publisher.image_overlay import TweetImageOverlayer
 from publisher.telegram_notifier import TelegramNotifier
 from scraper.image_downloader import ImageDownloader
+from scraper.keyword_queries import get_active_queries
 from scraper.models import DigestContent, ProcessedContent, RawTweet
 from scraper.rsshub_client import RSSHubClient
 from scraper.twscrape_client import TwscrapeClient
@@ -46,9 +50,21 @@ class Pipeline:
         self._telegram = TelegramNotifier(config.telegram) if config.telegram else None
         self._xai = XAIClient(config.xai, config.processor.openrouter_api_key) if config.xai else None
         self._viral_selector = ViralSelector(config.processor)
+        _deduplicator = EventDeduplicator(self._xai) if self._xai else None
+        self._sweep_runner = KeywordSweepRunner(
+            twscrape=self._twscrape,
+            xai=self._xai,
+            deduplicator=_deduplicator,
+            scorer=self._scorer,
+            repo=self._repo,
+            config=config,
+        )
+        self._refresher = KeywordRefresher(xai=self._xai, repo=self._repo)
         # 每周任务时间追踪（重启后首次会多跑一次，无害）
         self._last_keyword_run: float | None = None
         self._last_fun_run: float | None = None
+        self._last_sweep_run: float | None = None
+        self._last_refresh_run: float | None = None
 
     async def setup(self) -> Path:
         self._config.data_dir.mkdir(parents=True, exist_ok=True)
@@ -732,6 +748,89 @@ class Pipeline:
             for t in raw_tweets
         ]
         return {"items": items, "added_count": added_count}
+
+    async def list_keyword_queries(self, enabled_only: bool = True) -> list[dict]:
+        """查看关键词搜索查询列表。"""
+        await self.setup()
+        return await self._repo.list_keyword_queries(enabled_only=enabled_only)
+
+    # ── 关键词扫描 ──
+
+    async def keyword_sweep(self) -> dict:
+        """运行完整关键词扫描周期：收集→去重→聚类→评分→核查→入池。"""
+        await self.setup()
+        queries = await get_active_queries(self._repo)
+        if not queries:
+            return {"success": False, "reason": "无可用关键词查询"}
+        result: SweepResult = await self._sweep_runner.run_sweep(queries)
+        import datetime as _dt
+        self._last_sweep_run = _dt.datetime.now().timestamp()
+        return {
+            "success": True,
+            "sweep_id": result.sweep_id,
+            "total_fetched": result.total_fetched,
+            "unique_after_dedup": result.unique_after_dedup,
+            "events_merged": result.events_merged,
+            "candidates_added": result.candidates_added,
+            "duration_seconds": result.duration_seconds,
+            "errors": list(result.errors),
+        }
+
+    async def keyword_refresh(self) -> dict:
+        """每周：让 xAI 分析当前关键词命中率，返回 add/retire/modify 建议列表。
+
+        建议列表由调用方（bot.py）推送给用户确认，确认后调用 apply_keyword_suggestion()。
+        """
+        await self.setup()
+        suggestions = await self._refresher.suggest_updates()
+        import datetime as _dt
+        self._last_refresh_run = _dt.datetime.now().timestamp()
+        return {
+            "success": True,
+            "suggestions": [
+                {
+                    "action": s.action,
+                    "category": s.category,
+                    "query": s.query,
+                    "reason": s.reason,
+                    "confidence": s.confidence,
+                }
+                for s in suggestions
+            ],
+        }
+
+    async def apply_keyword_suggestion(
+        self, category: str, query_template: str, min_faves: int, action: str
+    ) -> bool:
+        """应用关键词建议：add 新增 / retire 退役 / modify 修改查询。"""
+        await self.setup()
+        if action == "add":
+            return await self._repo.add_keyword_query(
+                category=category,
+                query_template=query_template,
+                min_faves=min_faves,
+                priority=2,
+            )
+        if action == "retire":
+            rows = await self._repo.list_keyword_queries(enabled_only=False)
+            for row in rows:
+                if row["query_template"] == query_template:
+                    return await self._repo.retire_keyword_query(row["id"])
+        if action == "modify":
+            # modify = retire 同类别旧查询 + add 新查询
+            rows = await self._repo.list_keyword_queries(enabled_only=True)
+            for row in rows:
+                if row["category"] == category:
+                    await self._repo.retire_keyword_query(row["id"])
+                    break
+            return await self._repo.add_keyword_query(
+                category=category,
+                query_template=query_template,
+                min_faves=min_faves,
+                priority=2,
+            )
+        logger.warning("未知关键词建议 action: %s", action)
+        return False
 
     def _cleanup_images(self, images: list[str] | object) -> None:
         for image_str in images if isinstance(images, list) else []:
