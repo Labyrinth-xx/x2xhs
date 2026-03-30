@@ -1,5 +1,24 @@
 # DEVLOG
 
+## 2026-03-30 — xAI 背景调研 prompt 全面优化（5维度→3维度）
+
+### 完成内容
+- **ResearchBrief 精简**：5 字段（author_status / recent_events / structural_background / timing_subtext / broader_context）→ 3 字段（author_recent / event_context / notable_connections），消除重叠
+- **xAI 调研 prompt 重写**：角色改为"调查记者"；加入质量底线反面示例；notable_connections 提供时间巧合/前后矛盾/利害关系三类示例；总量预算制（500-1000字按需分配）；要求具体日期
+- **参数调整**：max_tokens 1200→2500、timeout 15s→45s（防止 web 搜索超时静默失败）、推文截断 500→800 字符
+- **to_prompt_section 重写**：header 改为"你已了解到"认知框架（不再说"背景调研"），字段顺序调整为 event_context→author_recent→notable_connections
+- **Claude system prompt 精炼**：新增"背景知识的运用"章节（6行）；deep 模式偏倚防护（背景不改变模式判断标准）；分析角度措辞从"发现事实"→"基于已知事实做判断"；Rule 7 简化
+- **测试**：新增 test_context_enricher.py（10个用例），更新 test_translator.py，全部 15 个测试通过
+
+### 关键决策
+- xAI 分工：只提供事实和事实关联，不做主观判断（"可能是想转移注意力"这类推测由 Claude 做）
+- 字数策略选总量预算制而非逐字段限定，让 xAI 按信息量自行分配，避免简单推文也填满字数
+- timeout 从 15s 改为 45s：web 搜索 + 2500 token 生成，15s 必然频繁超时导致静默失败
+
+### 遗留问题 / 下次继续
+- 端到端验证（test_xai.py / test_prompt.py）需真实 API key 手动运行，确认 Grok 输出质量符合预期
+- VPS 尚未同步本次改动，需在合适时机 push→pull→restart
+
 ## 2026-03-27 — 四项体验优化：整点刷新 / 分维度评分 / 文案视角 / 候选来源
 
 ### 完成内容
