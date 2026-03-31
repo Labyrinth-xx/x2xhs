@@ -289,7 +289,6 @@ class Pipeline:
         # 标记 sent + 从池中移除
         await self._repo.save_sent(content)
         await self._repo.mark_candidate_published(candidate["tweet_external_id"])
-        self._cleanup_images(payload.get("cleanup_paths", []))
 
         return {"success": True, "title": content.title_zh, "handle": tweet.handle}
 
@@ -455,7 +454,6 @@ class Pipeline:
                 self._cleanup_images(cleanup_paths)
                 continue
 
-            self._cleanup_images(cleanup_paths)
             sent += 1
 
         return {"fetched": fetched, "inserted": inserted, "sent": sent, "errors": errors}
@@ -657,7 +655,6 @@ class Pipeline:
         payload = await self._build_payload(content, selected)
         await self._telegram.notify_content(payload)
         await self._repo.save_sent(content)
-        self._cleanup_images(payload.get("cleanup_paths", []))
 
         return {
             "success": True,

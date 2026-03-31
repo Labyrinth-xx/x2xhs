@@ -6,7 +6,7 @@ from datetime import timezone
 from typing import Literal
 
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from config import ProcessorConfig
 from processor.context_enricher import ContextEnricher, ResearchBrief
@@ -36,8 +36,15 @@ _HANDLE_DISPLAY = {
 }
 
 
+_BODY_MAX_LENGTH: dict[str, int] = {
+    "light": 1000,
+    "deep": 1000,
+    "long": 5000,
+}
+
+
 class TranslationPayload(BaseModel):
-    mode: Literal["light", "deep"] = "light"
+    mode: Literal["light", "deep", "long"] = "light"
     title_zh: str = Field(min_length=1)
     body_zh: str
     tags: list[str] = Field(min_length=3, max_length=5)
@@ -47,15 +54,16 @@ class TranslationPayload(BaseModel):
     def truncate_title(cls, value: str) -> str:
         return value.strip()
 
-    @field_validator("body_zh")
-    @classmethod
-    def validate_body_length(cls, value: str) -> str:
-        stripped = value.strip()
+    @model_validator(mode="after")
+    def validate_body_length(self) -> "TranslationPayload":
+        stripped = self.body_zh.strip()
         if len(stripped) < 50:
             raise ValueError("body_zh 不能少于 50 字")
-        if len(stripped) > 1000:
-            raise ValueError("body_zh 不能超过 1000 字")
-        return stripped
+        limit = _BODY_MAX_LENGTH.get(self.mode, 1000)
+        if len(stripped) > limit:
+            raise ValueError(f"body_zh 不能超过 {limit} 字")
+        self.body_zh = stripped
+        return self
 
     @field_validator("tags")
     @classmethod
