@@ -231,14 +231,12 @@ class Pipeline:
         """格式化候选池列表为 Telegram 消息，带来源标签。"""
         lines = [f"📋 候选推文 ({len(candidates)}条)\n"]
         for i, c in enumerate(candidates, 1):
-            preview = (c.get("preview_text") or c.get("content", ""))[:150].replace("\n", " ")
             label = c.get("source_label", "账户")
             title_line = f"「{c['preview_title']}」\n" if c.get("preview_title") else ""
             reason = c.get("filter_reason", "")
             lines.append(
                 f"[{i}] 📌 [{c['filter_score']:g}分] [{label}] @{c['handle']}\n"
                 f"{title_line}"
-                f"{preview}...\n"
                 f"💡 {reason}\n"
             )
         return "\n".join(lines)
