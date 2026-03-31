@@ -186,11 +186,21 @@ class Pipeline:
         if expired:
             logger.info("过期清理 %d 条", expired)
 
-        # 将高分推文加入候选池
-        high_scorers = await self._repo.list_scored_candidates(
-            min_score=self.threshold,
-            limit=20,
+        # 将高分推文加入候选池（fast_track 账号使用更低门槛）
+        fast_track = frozenset(
+            a.lower() for a in self._config.filter.fast_track_accounts
         )
+        fast_threshold = self._config.filter.fast_track_threshold
+        effective_min = min(self.threshold, fast_threshold) if fast_track else self.threshold
+        all_scored = await self._repo.list_scored_candidates(
+            min_score=effective_min,
+            limit=30,
+        )
+        high_scorers = [
+            c for c in all_scored
+            if c["filter_score"] >= self.threshold
+            or (c["handle"].lower() in fast_track and c["filter_score"] >= fast_threshold)
+        ]
         added_count = 0
         source_label_map = {
             "account": "账户", "keyword": "关键词",

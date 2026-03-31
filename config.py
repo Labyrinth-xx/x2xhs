@@ -87,6 +87,8 @@ class FilterConfig:
     threshold: float = 7.5
     model: str = "deepseek/deepseek-chat"
     expire_hours: int = 72
+    fast_track_accounts: tuple[str, ...] = ("claudeai", "anthropicai")
+    fast_track_threshold: float = 6.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,10 +151,13 @@ def load_config() -> AppConfig:
         if telegram_bot_token and telegram_chat_id
         else None
     )
+    fast_track_env = os.getenv("FAST_TRACK_ACCOUNTS", "claudeai,anthropicai").strip()
     filter_cfg = FilterConfig(
         threshold=_parse_float("FILTER_THRESHOLD", "7.5"),
         model=os.getenv("FILTER_MODEL", "deepseek/deepseek-chat").strip(),
         expire_hours=_parse_int("FILTER_EXPIRE_HOURS", "72"),
+        fast_track_accounts=_split_csv(fast_track_env) if fast_track_env else (),
+        fast_track_threshold=_parse_float("FAST_TRACK_THRESHOLD", "6.0"),
     )
     poll_interval = _parse_int("POLL_INTERVAL_MINUTES", "60")
     xai_model = os.getenv("XAI_MODEL", "").strip()
