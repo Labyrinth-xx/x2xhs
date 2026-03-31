@@ -96,7 +96,7 @@ class XAIConfig:
     viral_candidate_limit: int = 15
     sweep_interval_hours: int = 8
     sweep_max_queries: int = 10
-    keyword_score_threshold: float = 7.0
+    keyword_score_threshold: float = 8.0
 
 
 @dataclass(frozen=True, slots=True)

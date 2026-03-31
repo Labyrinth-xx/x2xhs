@@ -297,10 +297,14 @@ class KeywordSweepRunner:
                     credibility = check.get("credibility", "unknown")
                     note = check.get("note", "")
                     credibility_note = f"[{credibility}] {note}"
-                    # 低可信度 + 不可验证 → 跳过
+                    # 低可信度账号 → 无条件跳过（不管内容能否核查）
+                    if credibility == "low":
+                        logger.info("可信度低，跳过 @%s: %s", tweet.handle, note)
+                        continue
+                    # unknown + 不可验证 → 跳过
                     if (
                         check.get("verifiable") is False
-                        and credibility in ("low", "unknown")
+                        and credibility == "unknown"
                     ):
                         logger.info(
                             "事实核查不通过，跳过 @%s: %s", tweet.handle, note
